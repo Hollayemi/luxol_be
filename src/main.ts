@@ -9,7 +9,7 @@ async function bootstrap() {
 
   app.setGlobalPrefix("api");
   app.enableCors({
-    origin: ["http://localhost:3000", "https://luxol.vercel.app"],
+    origin: "*",
     credentials: true,
   });
 
