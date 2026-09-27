@@ -1,4 +1,4 @@
-import { IsEmail, IsNotEmpty, IsString, MinLength } from "class-validator"
+import { IsBoolean, IsEmail, IsEnum, IsNotEmpty, IsOptional, IsString, MinLength } from "class-validator"
 
 
 export class RegisterDto {
@@ -21,6 +21,10 @@ export class LoginDto {
 
   @IsString()
   password: string;
+
+  @IsEnum(['admin', 'customer'])
+  @IsOptional()
+  type: 'admin' | 'customer'
 }
 
 

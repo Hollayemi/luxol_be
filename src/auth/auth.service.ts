@@ -1,5 +1,6 @@
 import {
   ConflictException,
+  ForbiddenException,
   Injectable,
   NotFoundException,
   UnauthorizedException,
@@ -10,6 +11,7 @@ import { OAuth2Client } from "google-auth-library";
 import { randomBytes } from "crypto";
 import { DatabaseService } from "../database/database.service.js";
 import { LoginDto, RegisterDto } from "./dto/register.dto.js";
+import { Role } from "../generated/prisma/enums.js";
 
 const googleClient = new OAuth2Client(process.env.AUTH_GOOGLE_ID);
 
@@ -18,7 +20,7 @@ export class AuthService {
   constructor(
     private db: DatabaseService,
     private jwt: JwtService,
-  ) {}
+  ) { }
 
   private sign(user: { id: string; email: string; role: string }) {
     return this.jwt.sign({ sub: user.id, email: user.email, role: user.role });
@@ -44,6 +46,9 @@ export class AuthService {
       },
     });
 
+    console.log("JWT_SECRET set:", !!process.env.JWT_SECRET);
+    console.log("JWT_SECRET length:", process.env.JWT_SECRET);
+
     return {
       message: "Account created",
       data: {
@@ -52,6 +57,8 @@ export class AuthService {
       },
     };
   }
+
+
 
   async login(dto: LoginDto) {
     const user = await this.db.user.findUnique({
@@ -62,6 +69,14 @@ export class AuthService {
 
     const ok = await bcrypt.compare(dto.password, user.passwordHash);
     if (!ok) throw new UnauthorizedException("Invalid credentials");
+    console.log(dto)
+
+    if (dto.type === 'admin')
+      if (user.role !== Role.ADMIN && user.role !== Role.SUPER_ADMIN)
+        throw new ForbiddenException("Not an admin account");
+
+    if (!user.isActive)
+      throw new ForbiddenException("Account disabled");
 
     await this.db.user.update({
       where: { id: user.id },
@@ -172,6 +187,7 @@ export class AuthService {
         where: { id: record.userId },
         data: { passwordHash },
       }),
+
       this.db.passwordResetToken.update({
         where: { id: record.id },
         data: { usedAt: new Date() },

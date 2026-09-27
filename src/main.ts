@@ -22,7 +22,7 @@ async function bootstrap() {
   );
 
   const logger = new Logger
-
+  
   app.useGlobalInterceptors(new ResponseInterceptor());
   app.useGlobalFilters(new HttpExceptionFilter(logger));
 

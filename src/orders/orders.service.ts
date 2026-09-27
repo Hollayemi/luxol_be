@@ -1,0 +1,707 @@
+import {
+  BadRequestException,
+  ForbiddenException,
+  Injectable,
+  Logger,
+  NotFoundException,
+} from "@nestjs/common";
+import { ConfigService } from "@nestjs/config";
+import { PlaceOrderDto } from "./dto/place-order.dto.js";
+import { ListOrdersDto } from "./dto/list-orders.dto.js";
+import { CancelOrderDto } from "./dto/cancel-order.dto.js";
+import { RateOrderDto } from "./dto/rate-order.dto.js";
+import { RequestReturnDto } from "./dto/request-return.dto.js";
+import {
+  serializeOrderDetail,
+  serializeOrderSummary,
+  serializeOrderTracking,
+  toFrontendStatus,
+} from "./orders.serializer.js";
+import { DatabaseService } from "../database/database.service.js";
+import { PaystackService } from "../payments/paystack.service.js";
+import { Prisma, PromotionStatus } from "../generated/prisma/client.js";
+import { nextOrderNumber } from "../common/utils/code.util.js";
+import { cartDiscount } from "../promotions/promotion-calc.js";
+import { advanceTrack, buildInitialTrackSteps } from "./track-steps.js";
+
+@Injectable()
+export class OrdersService {
+  private readonly logger = new Logger(OrdersService.name);
+
+  constructor(
+    private db: DatabaseService,
+    private paystack: PaystackService,
+    private config: ConfigService,
+  ) {}
+
+  // ─── Place order ────────────────────────────────────────────
+
+  async placeOrder(userId: string, dto: PlaceOrderDto) {
+    if (!dto.items.length) {
+      throw new BadRequestException("Cart is empty");
+    }
+
+    const user = await this.db.user.findUnique({ where: { id: userId } });
+    if (!user) throw new NotFoundException("User not found");
+
+    // 1. Validate address if delivery
+    let addressRow = null as any;
+    let deliveryAddressText = "";
+
+    const isDelivery = dto.deliveryMethod === "Delivery";
+    if (isDelivery) {
+      if (!dto.addressId) {
+        throw new BadRequestException(
+          "addressId is required for delivery orders",
+        );
+      }
+      addressRow = await this.db.address.findFirst({
+        where: { id: dto.addressId, userId },
+      });
+      if (!addressRow) {
+        throw new NotFoundException("Address not found");
+      }
+      deliveryAddressText = `${addressRow.fullName}, ${addressRow.address}, ${addressRow.region}`;
+    }
+
+    // 2. Resolve products & variants, compute subtotal
+    const productIds = [...new Set(dto.items.map((i) => i.productId))];
+    const products = await this.db.product.findMany({
+      where: { id: { in: productIds } },
+      include: { variants: true },
+    });
+    const byId = new Map(products.map((p) => [p.id, p]));
+
+    const lineItems: {
+      productId: string;
+      variantId: string | null;
+      productName: string;
+      variantLabel: string | null;
+      image: string | null;
+      unitLabel: string | null;
+      unitPrice: Prisma.Decimal;
+      quantity: number;
+      lineTotal: Prisma.Decimal;
+    }[] = [];
+
+    let subtotal = 0;
+
+    for (const line of dto.items) {
+      const product = byId.get(line.productId);
+      if (!product || product.status !== "ACTIVE") {
+        throw new BadRequestException(
+          `Product "${line.productId}" is not available`,
+        );
+      }
+
+      let unitPrice = Number(product.unitPrice);
+      let variantId: string | null = null;
+      let variantLabel: string | null = null;
+      let stock = product.stock;
+
+      if (product.variantOption === "PARENT" && line.variant) {
+        const variant =
+          product.variants.find((v) => v.id === line.variant) ??
+          product.variants.find((v) => v.label === line.variant);
+        if (!variant) {
+          throw new BadRequestException(
+            `Variant "${line.variant}" not found for ${product.name}`,
+          );
+        }
+        variantId = variant.id;
+        variantLabel = variant.label;
+        unitPrice = Number(variant.unitPrice);
+        stock = variant.stock;
+      }
+
+      if (stock < line.quantity) {
+        throw new BadRequestException(
+          `Insufficient stock for ${product.name} (available: ${stock})`,
+        );
+      }
+
+      const lineTotal = unitPrice * line.quantity;
+      subtotal += lineTotal;
+
+      lineItems.push({
+        productId: product.id,
+        variantId,
+        productName: product.name,
+        variantLabel,
+        image: (product.images as any)?.[0] ?? null,
+        unitLabel: product.unitType,
+        unitPrice: new Prisma.Decimal(unitPrice),
+        quantity: line.quantity,
+        lineTotal: new Prisma.Decimal(lineTotal),
+      });
+    }
+
+    // 3. Promo code
+    let promo = null as any;
+    let discount = 0;
+
+    if (dto.promoCode) {
+      const now = new Date();
+      promo = await this.db.promotion.findFirst({
+        where: {
+          code: dto.promoCode.toUpperCase(),
+          status: PromotionStatus.ACTIVE,
+          startAt: { lte: now },
+          OR: [{ endAt: null }, { endAt: { gte: now } }],
+        },
+      });
+
+      if (!promo) {
+        throw new BadRequestException("Invalid or expired promo code");
+      }
+      if (promo.usageLimit != null && promo.usedCount >= promo.usageLimit) {
+        throw new BadRequestException("Promo code usage limit reached");
+      }
+      if (
+        promo.minimumOrderAmount != null &&
+        subtotal < Number(promo.minimumOrderAmount)
+      ) {
+        throw new BadRequestException(
+          `Minimum order of ₦${Number(promo.minimumOrderAmount).toLocaleString()} required for this promo`,
+        );
+      }
+
+      discount = cartDiscount(subtotal, promo);
+    }
+
+    // 4. Delivery fee — ₦2,500 flat, charged only for Delivery
+    const FLAT_DELIVERY = Number(this.config.get("DELIVERY_FEE") ?? 2500);
+    const deliveryFee = isDelivery ? FLAT_DELIVERY : 0;
+
+    // 5. Totals
+    const total = Math.max(0, subtotal - discount + deliveryFee);
+
+    // 6. Create order + items + track steps in a transaction
+    const orderNumber = await nextOrderNumber(this.db);
+
+    const order = await this.db.$transaction(async (tx) => {
+      const created = await tx.order.create({
+        data: {
+          orderNumber,
+          userId,
+          addressId: addressRow?.id ?? null,
+          promoCodeId: promo?.id ?? null,
+          subtotal: new Prisma.Decimal(subtotal),
+          discount: new Prisma.Decimal(discount),
+          deliveryFee: new Prisma.Decimal(deliveryFee),
+          total: new Prisma.Decimal(total),
+          status: "IN_PROGRESS",
+          deliveryType: isDelivery ? "DELIVERY" : "PICKUP",
+          receiverName: addressRow?.fullName ?? user.name,
+          receiverPhone: dto.phone?.toString(),
+          contactEmail: user.email,
+          deliveryAddress: deliveryAddressText || null,
+          deliveryNotes: null,
+          items: {
+            create: lineItems,
+          },
+        },
+        include: {
+          items: true,
+          trackSteps: { orderBy: { sortOrder: "asc" } },
+          rating: true,
+          returnRequests: { orderBy: { requestedAt: "desc" }, take: 1 },
+        },
+      });
+
+      await buildInitialTrackSteps(tx, created.id);
+      await advanceTrack(tx, created.id, "PLACED");
+
+      // Decrement stock atomically
+      for (const line of lineItems) {
+        if (line.variantId) {
+          await tx.productVariant.update({
+            where: { id: line.variantId },
+            data: { stock: { decrement: line.quantity } },
+          });
+        } else {
+          await tx.product.update({
+            where: { id: line.productId },
+            data: { stock: { decrement: line.quantity } },
+          });
+        }
+        await tx.stockMovement.create({
+          data: {
+            productId: line.productId,
+            delta: -line.quantity,
+            reason: "order",
+            reference: created.id,
+          },
+        });
+      }
+
+      // Increment promo usedCount
+      if (promo) {
+        await tx.promotion.update({
+          where: { id: promo.id },
+          data: { usedCount: { increment: 1 } },
+        });
+      }
+
+      // Clear the user's cart (the source of truth has moved to the order)
+      await tx.cartItem.deleteMany({
+        where: { cart: { userId } },
+      });
+      // await tx.cart.updateMany({
+      //   where: { userId },
+      //   data: { promoCodeId: null },
+      // });
+      
+
+      return created;
+    });
+
+    // 7. Initialize Paystack payment (outside the DB transaction — network call)
+    const reference = `${orderNumber}-${Date.now()}`;
+    const amountKobo = Math.round(total * 100);
+
+    let init;
+    try {
+      init = await this.paystack.initialize({
+        email: user.email,
+        amountKobo,
+        reference,
+        callbackUrl: `${this.config.get("FRONTEND_URL")}/orders?orderId=${order.id}`,
+        metadata: {
+          orderId: order.id,
+          orderNumber,
+          userId,
+        },
+      });
+    } catch (err: any) {
+      this.logger.error(`Paystack init failed: ${err.message}`);
+      throw new BadRequestException(
+        "Could not start payment. Please try again.",
+      );
+    }
+
+    // 8. Persist the Payment row
+    await this.db.payment.create({
+      data: {
+        orderId: order.id,
+        userId,
+        provider: "PAYSTACK",
+        providerRef: init.reference,
+        amount: new Prisma.Decimal(total),
+        currency: this.config.get("CURRENCY") ?? "NGN",
+        status: "PENDING",
+        accessCode: init.accessCode,
+        authorizationUrl: init.authorizationUrl,
+        metadata: {
+          orderNumber,
+        },
+      },
+    });
+
+    // 9. Return the response the frontend expects
+    return {
+      id: order.id,
+      orderNumber,
+      payment: {
+        reference: init.reference,
+        authorizationUrl: init.authorizationUrl,
+        amount: total,
+        currency: this.config.get("CURRENCY") ?? "NGN",
+      },
+    };
+  }
+
+  // ─── Verify payment (called on redirect back) ──────────────
+
+  async verifyPayment(userId: string, reference: string) {
+    const payment = await this.db.payment.findUnique({
+      where: { providerRef: reference },
+      include: { order: true },
+    });
+
+    if (!payment) throw new NotFoundException("Payment not found");
+    if (payment.userId !== userId) {
+      throw new ForbiddenException("Not your payment");
+    }
+    if (payment.status === "SUCCESS") {
+      return { status: "SUCCESS", orderId: payment.orderId };
+    }
+
+    const result = await this.paystack.verify(reference);
+
+    if (result.status === "success") {
+      await this.db.$transaction(async (tx) => {
+        await tx.payment.update({
+          where: { id: payment.id },
+          data: {
+            status: "SUCCESS",
+            channel: result.channel,
+            paidAt: result.paidAt ? new Date(result.paidAt) : new Date(),
+          },
+        });
+        await tx.order.update({
+          where: { id: payment.orderId! },
+          data: { status: "IN_PROGRESS" },
+        });
+        await advanceTrack(tx, payment.orderId!, "PAYMENT");
+      });
+
+      return { status: "SUCCESS", orderId: payment.orderId };
+    }
+
+    if (result.status === "failed" || result.status === "abandoned") {
+      await this.db.payment.update({
+        where: { id: payment.id },
+        data: {
+          status: "FAILED",
+          failureReason: result.raw?.gateway_response ?? result.status,
+        },
+      });
+    }
+
+    return { status: result.status.toUpperCase(), orderId: payment.orderId };
+  }
+
+  // ─── Webhook handler (called by Paystack) ──────────────────
+
+  async handleWebhook(event: any) {
+    this.logger.log(`Paystack webhook: ${event.event}`);
+
+    if (event.event !== "charge.success") return;
+
+    const reference: string = event.data.reference;
+    const payment = await this.db.payment.findUnique({
+      where: { providerRef: reference },
+    });
+    if (!payment || payment.status === "SUCCESS") return;
+
+    const paidAt = event.data.paid_at
+      ? new Date(event.data.paid_at)
+      : new Date();
+
+    await this.db.$transaction(async (tx) => {
+      await tx.payment.update({
+        where: { id: payment.id },
+        data: {
+          status: "SUCCESS",
+          channel: event.data.channel,
+          paidAt,
+        },
+      });
+      await tx.order.update({
+        where: { id: payment.orderId! },
+        data: { status: "IN_PROGRESS" },
+      });
+      await advanceTrack(tx, payment.orderId!, "PAYMENT");
+    });
+  }
+
+  // ─── List ───────────────────────────────────────────────────
+
+  async list(userId: string, dto: ListOrdersDto) {
+    const page = dto.page ?? 1;
+    const pageSize = dto.pageSize ?? 10;
+    const skip = (page - 1) * pageSize;
+
+    const where: Prisma.OrderWhereInput = { userId };
+
+    if (dto.tab === "cancelled") {
+      where.status = { in: ["CANCELLED", "RETURNED"] };
+    } else if (dto.tab === "orders") {
+      where.status = { in: ["IN_PROGRESS", "COMPLETED"] };
+    } else if (dto.status?.length) {
+      where.status = { in: mapFrontendStatuses(dto.status) as any };
+    }
+
+    const [total, rows] = await this.db.$transaction([
+      this.db.order.count({ where }),
+      this.db.order.findMany({
+        where,
+        include: {
+          items: { select: { quantity: true, lineTotal: true } },
+        },
+        orderBy: { placedAt: "desc" },
+        skip,
+        take: pageSize,
+      }),
+    ]);
+
+    return {
+      orders: rows.map(serializeOrderSummary),
+      page,
+      pageSize,
+      total,
+      totalPages: Math.max(1, Math.ceil(total / pageSize)),
+    };
+  }
+
+  // ─── Detail ─────────────────────────────────────────────────
+
+  private detailInclude = {
+    items: true,
+    trackSteps: { orderBy: { sortOrder: "asc" as const } },
+    rating: true,
+    returnRequests: {
+      orderBy: { requestedAt: "desc" as const },
+      take: 1,
+    },
+  };
+
+  async findOne(userId: string, id: string) {
+    const order = await this.db.order.findFirst({
+      where: { id, userId },
+      include: this.detailInclude,
+    });
+    if (!order) throw new NotFoundException("Order not found");
+    return serializeOrderDetail(order);
+  }
+
+  async tracking(userId: string, id: string) {
+    const order = await this.db.order.findFirst({
+      where: { id, userId },
+      include: { trackSteps: { orderBy: { sortOrder: "asc" } } },
+    });
+    if (!order) throw new NotFoundException("Order not found");
+    return serializeOrderTracking(order);
+  }
+
+  // ─── Cancel ─────────────────────────────────────────────────
+
+  async cancel(userId: string, id: string, dto: CancelOrderDto) {
+    const order = await this.db.order.findFirst({
+      where: { id, userId },
+      include: this.detailInclude,
+    });
+    if (!order) throw new NotFoundException("Order not found");
+
+    if (order.status !== "IN_PROGRESS") {
+      throw new BadRequestException(
+        `Cannot cancel an order that is ${toFrontendStatus(order.status)}`,
+      );
+    }
+
+    // Refuse to cancel once it's shipped
+    const shipped = order.trackSteps.find(
+      (t) => t.stepId === "OUT_FOR_DELIVERY" && t.state === "DONE",
+    );
+    if (shipped) {
+      throw new BadRequestException(
+        "Order already out for delivery and cannot be cancelled",
+      );
+    }
+
+    const updated = await this.db.$transaction(async (tx) => {
+      // Restock
+      for (const item of order.items) {
+        if (item.variantId) {
+          await tx.productVariant.update({
+            where: { id: item.variantId },
+            data: { stock: { increment: item.quantity } },
+          });
+        } else {
+          await tx.product.update({
+            where: { id: item.productId },
+            data: { stock: { increment: item.quantity } },
+          });
+        }
+        await tx.stockMovement.create({
+          data: {
+            productId: item.productId,
+            delta: item.quantity,
+            reason: "cancel",
+            reference: id,
+          },
+        });
+      }
+
+      return tx.order.update({
+        where: { id },
+        data: {
+          status: "CANCELLED",
+          cancelledAt: new Date(),
+          cancelReason: dto.reason,
+        },
+        include: this.detailInclude,
+      });
+    });
+
+    return serializeOrderDetail(updated);
+  }
+
+  // ─── Rate ───────────────────────────────────────────────────
+
+  async rate(userId: string, id: string, dto: RateOrderDto) {
+    const order = await this.db.order.findFirst({
+      where: { id, userId },
+      include: { rating: true },
+    });
+    if (!order) throw new NotFoundException("Order not found");
+    if (order.status !== "COMPLETED") {
+      throw new BadRequestException("You can only rate completed orders");
+    }
+    if (order.rating) {
+      throw new BadRequestException("This order has already been rated");
+    }
+
+    const created = await this.db.$transaction(async (tx) => {
+      const rating = await tx.orderRating.create({
+        data: {
+          orderId: id,
+          userId,
+          stars: dto.stars,
+          comment: dto.comment ?? null,
+        },
+      });
+      await advanceTrack(tx, id, "RATE");
+      return rating;
+    });
+
+    return {
+      stars: created.stars,
+      comment: created.comment ?? undefined,
+      submittedAt: created.submittedAt.toISOString(),
+    };
+  }
+
+  // ─── Return ─────────────────────────────────────────────────
+
+  async requestReturn(userId: string, id: string, dto: RequestReturnDto) {
+    const order = await this.db.order.findFirst({
+      where: { id, userId },
+      include: { items: true, returnRequests: true },
+    });
+    if (!order) throw new NotFoundException("Order not found");
+    if (order.status !== "COMPLETED") {
+      throw new BadRequestException("Only completed orders can be returned");
+    }
+    if (order.returnRequests.length > 0) {
+      throw new BadRequestException("A return has already been requested");
+    }
+
+    // Validate itemIds if present
+    if (dto.itemIds?.length) {
+      const valid = new Set(order.items.map((i) => i.id));
+      const bad = dto.itemIds.filter((x) => !valid.has(x));
+      if (bad.length) {
+        throw new BadRequestException(
+          `Invalid itemIds: ${bad.join(", ")}`,
+        );
+      }
+    }
+
+    // Refund amount: sum of selected lines (or full order)
+    const selected = dto.itemIds?.length
+      ? order.items.filter((i) => dto.itemIds!.includes(i.id))
+      : order.items;
+    const refundAmount = selected.reduce(
+      (sum, i) => sum + Number(i.lineTotal),
+      0,
+    );
+
+    const created = await this.db.returnRequest.create({
+      data: {
+        orderId: id,
+        userId,
+        status: "PENDING_REVIEW",
+        reason: dto.reason,
+        itemIds: dto.itemIds ?? [],
+        refundAmount: new Prisma.Decimal(refundAmount),
+      },
+    });
+
+    return {
+      returnId: created.id,
+      status: created.status.toLowerCase(),
+      requestedAt: created.requestedAt.toISOString(),
+    };
+  }
+
+  // ─── Reorder ────────────────────────────────────────────────
+
+  async reorder(userId: string, id: string) {
+    const order = await this.db.order.findFirst({
+      where: { id, userId },
+      include: { items: true },
+    });
+    if (!order) throw new NotFoundException("Order not found");
+
+    const productIds = [...new Set(order.items.map((i) => i.productId))];
+    const products = await this.db.product.findMany({
+      where: { id: { in: productIds } },
+      include: { variants: true },
+    });
+    const byId = new Map(products.map((p) => [p.id, p]));
+
+    // Ensure cart exists
+    let cart = await this.db.cart.findUnique({ where: { userId } });
+    if (!cart) cart = await this.db.cart.create({ data: { userId } });
+
+    const added: string[] = [];
+    const unavailable: string[] = [];
+
+    await this.db.$transaction(async (tx) => {
+      for (const line of order.items) {
+        const product = byId.get(line.productId);
+        if (!product || product.status !== "ACTIVE") {
+          unavailable.push(line.id);
+          continue;
+        }
+
+        let stock = product.stock;
+        if (line.variantId) {
+          const v = product.variants.find((x) => x.id === line.variantId);
+          if (!v) {
+            unavailable.push(line.id);
+            continue;
+          }
+          stock = v.stock;
+        }
+
+        if (stock < line.quantity) {
+          unavailable.push(line.id);
+          continue;
+        }
+
+        const existing = await tx.cartItem.findFirst({
+          where: {
+            cartId: cart!.id,
+            productId: line.productId,
+            variantId: line.variantId,
+          },
+        });
+
+        if (existing) {
+          await tx.cartItem.update({
+            where: { id: existing.id },
+            data: { quantity: existing.quantity + line.quantity },
+          });
+        } else {
+          await tx.cartItem.create({
+            data: {
+              cartId: cart!.id,
+              productId: line.productId,
+              variantId: line.variantId,
+              quantity: line.quantity,
+            },
+          });
+        }
+        added.push(line.id);
+      }
+    });
+
+    return {
+      cartItemsAdded: added.length,
+      unavailableItemIds: unavailable,
+    };
+  }
+}
+
+function mapFrontendStatuses(fe: string[]): string[] {
+  const map: Record<string, string> = {
+    "in-progress": "IN_PROGRESS",
+    completed: "COMPLETED",
+    cancelled: "CANCELLED",
+    returned: "RETURNED",
+  };
+  return fe.map((s) => map[s] ?? s);
+}

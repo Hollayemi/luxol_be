@@ -6,7 +6,7 @@ import { PrismaClient } from '../generated/prisma/client.js';
 export class DatabaseService extends PrismaClient {
   constructor() {
     const adapter = new PrismaPg({
-      connectionString: "postgresql://admin:12345@localhost:5432/luxol?schema=public" // process.env.DATABASE_URL!,
+      connectionString: "postgresql://neondb_owner:npg_pqI0BGsTxM1K@ep-weathered-sun-b5i81afm-pooler.c-7.us-east-2.aws.neon.tech/neondb?sslmode=require&channel_binding=require" // process.env.DATABASE_URL!,
     });
 
     super({ adapter });

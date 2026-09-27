@@ -5,13 +5,18 @@ import { AuthController } from "./auth.controller.js";
 import { AuthService } from "./auth.service.js";
 import { JwtStrategy } from "./strategies/jwt.strategy.js";
 import { DatabaseService } from "../database/database.service.js";
+import { ConfigModule, ConfigService } from "@nestjs/config";
 
 @Module({
   imports: [
     PassportModule,
-    JwtModule.register({
-      secret: 'process.env.JWT_SECRET',
-      signOptions: { expiresIn:  7 },
+    JwtModule.registerAsync({
+      imports: [ConfigModule],              // ✅ critical — gives ConfigService the env
+      inject: [ConfigService],
+      useFactory: (config: ConfigService) => ({
+        secret: config.get<string>('JWT_SECRET'),
+        signOptions: { expiresIn: '7d' },
+      }),
     }),
   ],
   controllers: [AuthController],

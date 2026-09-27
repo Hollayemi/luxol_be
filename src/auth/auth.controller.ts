@@ -7,7 +7,7 @@ import { AuthService } from "./auth.service.js";
 
 @Controller("auth")
 export class AuthController {
-  constructor(private auth: AuthService) {}
+  constructor(private auth: AuthService) { }
 
   @Post("register")
   register(@Body() dto: RegisterDto) {
