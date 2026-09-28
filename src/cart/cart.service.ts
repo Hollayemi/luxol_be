@@ -140,7 +140,7 @@ export class CartService {
 
     const refreshed = await this.db.cart.findUniqueOrThrow({
       where: { id: cart.id },
-      include: { items: true, promoCode: true },
+      include: { items: true },
     });
 
     return this.serializeCart(refreshed);

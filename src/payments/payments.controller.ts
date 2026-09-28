@@ -1,34 +1,20 @@
-import { Controller, Get, Post, Body, Patch, Param, Delete } from '@nestjs/common';
-import { PaymentsService } from './payments.service.js';
-import { CreatePaymentDto } from './dto/create-payment.dto.js';
-import { UpdatePaymentDto } from './dto/update-payment.dto.js';
+import { Controller, Get, Query, Redirect, Res } from '@nestjs/common';
+import { PaystackService } from './paystack.service.js';
+import { InitializedDto } from './dto/initialized.dto.js';
+import type { Response } from 'express';
 
 @Controller('payments')
 export class PaymentsController {
-  constructor(private readonly paymentsService: PaymentsService) {}
+  constructor(private readonly ps: PaystackService) { }
 
-  @Post()
-  create(@Body() createPaymentDto: CreatePaymentDto) {
-    return this.paymentsService.create(createPaymentDto);
-  }
-
-  @Get()
-  findAll() {
-    return this.paymentsService.findAll();
-  }
-
-  @Get(':id')
-  findOne(@Param('id') id: string) {
-    return this.paymentsService.findOne(+id);
-  }
-
-  @Patch(':id')
-  update(@Param('id') id: string, @Body() updatePaymentDto: UpdatePaymentDto) {
-    return this.paymentsService.update(+id, updatePaymentDto);
-  }
-
-  @Delete(':id')
-  remove(@Param('id') id: string) {
-    return this.paymentsService.remove(+id);
+  @Get('verify')
+  @Redirect()
+  async verify(
+    @Query() reference: InitializedDto,
+    @Res() res: Response,
+  ): Promise<any> {
+    const result =  await this.ps.confirmPayment(reference.reference);
+    console.log(result)
+    return res.redirect(302, result);
   }
 }

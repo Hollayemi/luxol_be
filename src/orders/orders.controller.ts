@@ -31,6 +31,7 @@ export class OrdersController {
 
   @Get()
   async list(@CurrentUser() u: { id: string }, @Query() dto: ListOrdersDto) {
+    console.log("=========>")
     return { message: "OK", data: await this.orders.list(u.id, dto) };
   }
 
