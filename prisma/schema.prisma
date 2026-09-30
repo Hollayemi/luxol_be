@@ -41,10 +41,19 @@ enum VariantOption {
 }
 
 enum OrderStatus {
-  IN_PROGRESS
-  COMPLETED
+  PENDING
+  PROCESSING
+  OUT_FOR_DELIVERY
+  DELIVERED
   CANCELLED
   RETURNED
+  REFUNDED
+}
+
+enum OrderType {
+  SHOP
+  MEAT_BOX
+  FREEZER_PLANNER
 }
 
 enum DeliveryType {
@@ -52,20 +61,6 @@ enum DeliveryType {
   PICKUP
 }
 
-enum TrackStepId {
-  PLACED
-  PAYMENT
-  PACKED
-  OUT_FOR_DELIVERY
-  RECEIVED
-  RATE
-}
-
-enum TrackStepState {
-  DONE
-  ACTIVE
-  PENDING
-}
 
 enum ReturnStatus {
   PENDING_REVIEW
@@ -432,7 +427,8 @@ model Order {
   discount         Decimal      @default(0) @db.Decimal(12, 2)
   deliveryFee      Decimal      @default(0) @db.Decimal(12, 2)
   total            Decimal      @db.Decimal(12, 2)
-  status           OrderStatus  @default(IN_PROGRESS)
+  status           OrderStatus  @default(PENDING)
+  type             OrderType    @default(SHOP)
   deliveryType     DeliveryType
   deliveryZoneId   String?
   deliveryWindow   String?
@@ -459,7 +455,7 @@ model Order {
   promoCode      Promotion?       @relation(fields: [promoCodeId], references: [id])
   deliveryZone   DeliveryZone?    @relation(fields: [deliveryZoneId], references: [id])
   items          OrderItem[]
-  trackSteps     OrderTrackStep[]
+  timeline       Json             @default("[]")
   payments       Payment[]
   rating         OrderRating?
   returnRequests ReturnRequest[]
@@ -491,22 +487,19 @@ model OrderItem {
   @@index([productId])
 }
 
-model OrderTrackStep {
-  id          String         @id @default(cuid())
-  orderId     String
-  stepId      TrackStepId
-  title       String
-  description String
-  state       TrackStepState @default(PENDING)
-  occurredAt  DateTime?
-  sortOrder   Int            @default(0)
-  createdAt   DateTime       @default(now())
-  updatedAt   DateTime       @updatedAt
+enum OrderStepId {
+  PLACED
+  PAYMENT
+  PACKED
+  OUT_FOR_DELIVERY
+  RECEIVED
+  RATE
+}
 
-  order Order @relation(fields: [orderId], references: [id], onDelete: Cascade)
-
-  @@unique([orderId, stepId])
-  @@index([orderId])
+enum OrderStepState {
+  DONE
+  ACTIVE
+  PENDING
 }
 
 model OrderRating {

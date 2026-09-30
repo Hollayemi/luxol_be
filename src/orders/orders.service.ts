@@ -12,6 +12,7 @@ import { CancelOrderDto } from "./dto/cancel-order.dto.js";
 import { RateOrderDto } from "./dto/rate-order.dto.js";
 import { RequestReturnDto } from "./dto/request-return.dto.js";
 import {
+  readTimeline,
   serializeOrderDetail,
   serializeOrderSummary,
   serializeOrderTracking,
@@ -22,7 +23,7 @@ import { PaystackService } from "../payments/paystack.service.js";
 import { Prisma, PromotionStatus } from "../generated/prisma/client.js";
 import { nextOrderNumber } from "../common/utils/code.util.js";
 import { cartDiscount } from "../promotions/promotion-calc.js";
-import { advanceTrack, buildInitialTrackSteps } from "./track-steps.js";
+import { buildTimeline, closeTimeline } from "./order-timeline.js";
 
 @Injectable()
 export class OrdersService {
@@ -32,321 +33,319 @@ export class OrdersService {
     private db: DatabaseService,
     private paystack: PaystackService,
     private config: ConfigService,
-  ) {}
+  ) { }
 
   // ─── Place order ────────────────────────────────────────────
 
- async placeOrder(userId: string, dto: PlaceOrderDto) {
-  if (!dto.items.length) {
-    throw new BadRequestException("Cart is empty");
-  }
-
-  const user = await this.db.user.findUnique({ where: { id: userId } });
-  if (!user) throw new NotFoundException("User not found");
-
-  // ── 1. Address (unchanged, but note the string you store) ──
-  const isDelivery = dto.deliveryMethod === "DELIVERY" || dto.deliveryMethod === "Delivery";
-  let addressRow = null as any;
-  let deliveryAddressText = "";
-
-  if (isDelivery) {
-    if (!dto.addressId) {
-      throw new BadRequestException("addressId is required for delivery orders");
+  async placeOrder(userId: string, dto: PlaceOrderDto) {
+    if (!dto.items.length) {
+      throw new BadRequestException("Cart is empty");
     }
-    addressRow = await this.db.address.findFirst({
-      where: { id: dto.addressId, userId },
+
+    const user = await this.db.user.findUnique({ where: { id: userId } });
+    if (!user) throw new NotFoundException("User not found");
+
+    // ── 1. Address (unchanged, but note the string you store) ──
+    const isDelivery = dto.deliveryMethod === "DELIVERY" || dto.deliveryMethod === "Delivery";
+    let addressRow = null as any;
+    let deliveryAddressText = "";
+
+    if (isDelivery) {
+      if (!dto.addressId) {
+        throw new BadRequestException("addressId is required for delivery orders");
+      }
+      addressRow = await this.db.address.findFirst({
+        where: { id: dto.addressId, userId },
+      });
+      if (!addressRow) throw new NotFoundException("Address not found");
+      deliveryAddressText = `${addressRow.fullName}, ${addressRow.address}, ${addressRow.region}`;
+    }
+
+    // ── 2. Products, variants, subtotal ──
+    const productIds = [...new Set(dto.items.map((i) => i.productId))];
+    const products = await this.db.product.findMany({
+      where: { id: { in: productIds } },
+      include: { variants: true },
     });
-    if (!addressRow) throw new NotFoundException("Address not found");
-    deliveryAddressText = `${addressRow.fullName}, ${addressRow.address}, ${addressRow.region}`;
-  }
+    const byId = new Map(products.map((p) => [p.id, p]));
 
-  // ── 2. Products, variants, subtotal ──
-  const productIds = [...new Set(dto.items.map((i) => i.productId))];
-  const products = await this.db.product.findMany({
-    where: { id: { in: productIds } },
-    include: { variants: true },
-  });
-  const byId = new Map(products.map((p) => [p.id, p]));
+    const lineItems: {
+      productId: string;
+      variantId: string | null;
+      productName: string;
+      variantLabel: string | null;
+      image: string | null;
+      unitLabel: string | null;
+      unitPrice: Prisma.Decimal;
+      quantity: number;
+      lineTotal: Prisma.Decimal;
+      /** for promo eligibility checks below */
+      categoryId: string;
+    }[] = [];
 
-  const lineItems: {
-    productId: string;
-    variantId: string | null;
-    productName: string;
-    variantLabel: string | null;
-    image: string | null;
-    unitLabel: string | null;
-    unitPrice: Prisma.Decimal;
-    quantity: number;
-    lineTotal: Prisma.Decimal;
-    /** for promo eligibility checks below */
-    categoryId: string;
-  }[] = [];
+    let subtotal = 0;
 
-  let subtotal = 0;
+    for (const line of dto.items) {
+      const product = byId.get(line.productId);
+      if (!product || product.status !== "ACTIVE") {
+        throw new BadRequestException(`Product "${line.productId}" is not available`);
+      }
 
-  for (const line of dto.items) {
-    const product = byId.get(line.productId);
-    if (!product || product.status !== "ACTIVE") {
-      throw new BadRequestException(`Product "${line.productId}" is not available`);
-    }
+      let unitPrice = Number(product.unitPrice);
+      let variantId: string | null = null;
+      let variantLabel: string | null = null;
+      let stock = product.stock;
 
-    let unitPrice = Number(product.unitPrice);
-    let variantId: string | null = null;
-    let variantLabel: string | null = null;
-    let stock = product.stock;
+      if (product.variantOption === "PARENT" && line.variant) {
+        const variant =
+          product.variants.find((v) => v.id === line.variant) ??
+          product.variants.find((v) => v.label === line.variant);
+        if (!variant) {
+          throw new BadRequestException(
+            `Variant "${line.variant}" not found for ${product.name}`,
+          );
+        }
+        variantId = variant.id;
+        variantLabel = variant.label;
+        unitPrice = Number(variant.unitPrice);
+        stock = variant.stock;
+      }
 
-    if (product.variantOption === "PARENT" && line.variant) {
-      const variant =
-        product.variants.find((v) => v.id === line.variant) ??
-        product.variants.find((v) => v.label === line.variant);
-      if (!variant) {
+      if (stock < line.quantity) {
         throw new BadRequestException(
-          `Variant "${line.variant}" not found for ${product.name}`,
+          `Insufficient stock for ${product.name} (available: ${stock})`,
         );
       }
-      variantId = variant.id;
-      variantLabel = variant.label;
-      unitPrice = Number(variant.unitPrice);
-      stock = variant.stock;
-    }
 
-    if (stock < line.quantity) {
-      throw new BadRequestException(
-        `Insufficient stock for ${product.name} (available: ${stock})`,
-      );
-    }
+      const lineTotal = unitPrice * line.quantity;
+      subtotal += lineTotal;
 
-    const lineTotal = unitPrice * line.quantity;
-    subtotal += lineTotal;
-
-    lineItems.push({
-      productId: product.id,
-      variantId,
-      productName: product.name,
-      variantLabel,
-      image: (product as any).images?.[0] ?? null,   // ← see note below
-      unitLabel: product.unitType,
-      unitPrice: new Prisma.Decimal(unitPrice),
-      quantity: line.quantity,
-      lineTotal: new Prisma.Decimal(lineTotal),
-      categoryId: product.categoryId,
-    });
-  }
-
-  // ── 3. Promo ──
-  let promo: any = null;
-  let discount = 0;          // discount applied to items
-  let deliveryWaived = false; // for FREE_DELIVERY promos
-
-  if (dto.promoCode) {
-    const now = new Date();
-    promo = await this.db.promotion.findFirst({
-      where: {
-        code: dto.promoCode.toUpperCase(),
-        status: PromotionStatus.ACTIVE,
-        startAt: { lte: now },
-        OR: [{ endAt: null }, { endAt: { gte: now } }],
-      },
-    });
-
-    if (!promo) throw new BadRequestException("Invalid or expired promo code");
-    if (promo.usageLimit != null && promo.usedCount >= promo.usageLimit) {
-      throw new BadRequestException("Promo code usage limit reached");
-    }
-    if (
-      promo.minimumOrderAmount != null &&
-      subtotal < Number(promo.minimumOrderAmount)
-    ) {
-      throw new BadRequestException(
-        `Minimum order of ₦${Number(promo.minimumOrderAmount).toLocaleString()} required for this promo`,
-      );
-    }
-
-    // ── 3a. appliesTo eligibility ─────────────────────────────
-    // Compute the subtotal of the *eligible* portion of the cart.
-    let eligibleSubtotal = 0;
-
-    if (promo.appliesTo === "ALL_ORDERS") {
-      eligibleSubtotal = subtotal;
-    } else if (promo.appliesTo === "CATEGORY") {
-      eligibleSubtotal = lineItems
-        .filter((li) => li.categoryId === promo.categoryId)
-        .reduce((sum, li) => sum + Number(li.lineTotal), 0);
-
-      if (eligibleSubtotal === 0) {
-        throw new BadRequestException(
-          "This promo does not apply to any items in your cart",
-        );
-      }
-    } else if (promo.appliesTo === "SPECIFIC_PRODUCTS") {
-      const allowed = new Set<string>(promo.productIds);
-      eligibleSubtotal = lineItems
-        .filter((li) => allowed.has(li.productId))
-        .reduce((sum, li) => sum + Number(li.lineTotal), 0);
-
-      if (eligibleSubtotal === 0) {
-        throw new BadRequestException(
-          "This promo does not apply to any items in your cart",
-        );
-      }
-    }
-
-    // ── 3b. Compute discount from the eligible portion ────────
-    if (promo.discountType === "PERCENTAGE") {
-      discount = (eligibleSubtotal * Number(promo.discountValue)) / 100;
-      if (promo.maximumDiscount != null) {
-        discount = Math.min(discount, Number(promo.maximumDiscount));
-      }
-    } else if (promo.discountType === "FIXED_AMOUNT") {
-      discount = Math.min(Number(promo.discountValue), eligibleSubtotal);
-    } else if (promo.discountType === "FREE_DELIVERY") {
-      // Waives the delivery fee, doesn't touch item subtotal
-      if (!isDelivery) {
-        throw new BadRequestException(
-          "This promo is for delivery orders only",
-        );
-      }
-      deliveryWaived = true;
-      discount = 0;
-    }
-  }
-
-  // ── 4. Delivery fee ──
-  const FLAT_DELIVERY = Number(this.config.get("DELIVERY_FEE") ?? 2500);
-  let deliveryFee = isDelivery ? FLAT_DELIVERY : 0;
-  if (deliveryWaived) deliveryFee = 0;
-
-  // ── 5. Totals ──
-  const roundedDiscount = Math.round(discount * 100) / 100;
-  const total = Math.max(0, subtotal - roundedDiscount + deliveryFee);
-
-  // ── 6. Transaction ──
-  const orderNumber = await nextOrderNumber(this.db);
-
-  const order = await this.db.$transaction(async (tx) => {
-    const created = await tx.order.create({
-      data: {
-        orderNumber,
-        userId,
-        addressId: addressRow?.id ?? null,
-        promoCodeId: promo?.id ?? null,
-        subtotal: new Prisma.Decimal(subtotal),
-        discount: new Prisma.Decimal(roundedDiscount),
-        deliveryFee: new Prisma.Decimal(deliveryFee),
-        total: new Prisma.Decimal(total),
-        status: "IN_PROGRESS",
-        deliveryType: isDelivery ? "DELIVERY" : "PICKUP",
-        receiverName: addressRow?.fullName ?? user.name,
-        receiverPhone: dto.phone?.toString(),
-        contactEmail: user.email,
-        deliveryAddress: deliveryAddressText || null,
-        items: { create: lineItems.map(({ categoryId, ...rest }) => rest) },
-      },
-      include: {
-        items: true,
-        trackSteps: { orderBy: { sortOrder: "asc" } },
-        rating: true,
-        returnRequests: { orderBy: { requestedAt: "desc" }, take: 1 },
-      },
-    });
-
-    await buildInitialTrackSteps(tx, created.id);
-    await advanceTrack(tx, created.id, "PLACED");
-
-    for (const line of lineItems) {
-      if (line.variantId) {
-        await tx.productVariant.update({
-          where: { id: line.variantId },
-          data: { stock: { decrement: line.quantity } },
-        });
-      } else {
-        await tx.product.update({
-          where: { id: line.productId },
-          data: { stock: { decrement: line.quantity } },
-        });
-      }
-      await tx.stockMovement.create({
-        data: {
-          productId: line.productId,
-          delta: -line.quantity,
-          reason: "order",
-          reference: created.id,
-        },
+      lineItems.push({
+        productId: product.id,
+        variantId,
+        productName: product.name,
+        variantLabel,
+        image: (product as any).images?.[0] ?? null,   // ← see note below
+        unitLabel: product.unitType,
+        unitPrice: new Prisma.Decimal(unitPrice),
+        quantity: line.quantity,
+        lineTotal: new Prisma.Decimal(lineTotal),
+        categoryId: product.categoryId,
       });
     }
 
-    // Only increment usedCount if the promo actually did something
-    if (promo && (roundedDiscount > 0 || deliveryWaived)) {
-      await tx.promotion.update({
-        where: { id: promo.id },
-        data: {
-          usedCount: { increment: 1 },
-          totalDiscountGiven: { increment: new Prisma.Decimal(roundedDiscount) },
-          totalOrdersAffected: { increment: 1 },
-          totalSalesMade: { increment: new Prisma.Decimal(total) },
+    // ── 3. Promo ──
+    let promo: any = null;
+    let discount = 0;          // discount applied to items
+    let deliveryWaived = false; // for FREE_DELIVERY promos
+
+    if (dto.promoCode) {
+      const now = new Date();
+      promo = await this.db.promotion.findFirst({
+        where: {
+          code: dto.promoCode.toUpperCase(),
+          status: PromotionStatus.ACTIVE,
+          startAt: { lte: now },
+          OR: [{ endAt: null }, { endAt: { gte: now } }],
         },
       });
+
+      if (!promo) throw new BadRequestException("Invalid or expired promo code");
+      if (promo.usageLimit != null && promo.usedCount >= promo.usageLimit) {
+        throw new BadRequestException("Promo code usage limit reached");
+      }
+      if (
+        promo.minimumOrderAmount != null &&
+        subtotal < Number(promo.minimumOrderAmount)
+      ) {
+        throw new BadRequestException(
+          `Minimum order of ₦${Number(promo.minimumOrderAmount).toLocaleString()} required for this promo`,
+        );
+      }
+
+      // ── 3a. appliesTo eligibility ─────────────────────────────
+      // Compute the subtotal of the *eligible* portion of the cart.
+      let eligibleSubtotal = 0;
+
+      if (promo.appliesTo === "ALL_ORDERS") {
+        eligibleSubtotal = subtotal;
+      } else if (promo.appliesTo === "CATEGORY") {
+        eligibleSubtotal = lineItems
+          .filter((li) => li.categoryId === promo.categoryId)
+          .reduce((sum, li) => sum + Number(li.lineTotal), 0);
+
+        if (eligibleSubtotal === 0) {
+          throw new BadRequestException(
+            "This promo does not apply to any items in your cart",
+          );
+        }
+      } else if (promo.appliesTo === "SPECIFIC_PRODUCTS") {
+        const allowed = new Set<string>(promo.productIds);
+        eligibleSubtotal = lineItems
+          .filter((li) => allowed.has(li.productId))
+          .reduce((sum, li) => sum + Number(li.lineTotal), 0);
+
+        if (eligibleSubtotal === 0) {
+          throw new BadRequestException(
+            "This promo does not apply to any items in your cart",
+          );
+        }
+      }
+
+      // ── 3b. Compute discount from the eligible portion ────────
+      if (promo.discountType === "PERCENTAGE") {
+        discount = (eligibleSubtotal * Number(promo.discountValue)) / 100;
+        if (promo.maximumDiscount != null) {
+          discount = Math.min(discount, Number(promo.maximumDiscount));
+        }
+      } else if (promo.discountType === "FIXED_AMOUNT") {
+        discount = Math.min(Number(promo.discountValue), eligibleSubtotal);
+      } else if (promo.discountType === "FREE_DELIVERY") {
+        // Waives the delivery fee, doesn't touch item subtotal
+        if (!isDelivery) {
+          throw new BadRequestException(
+            "This promo is for delivery orders only",
+          );
+        }
+        deliveryWaived = true;
+        discount = 0;
+      }
     }
 
-    await tx.cartItem.deleteMany({ where: { cart: { userId } } });
+    // ── 4. Delivery fee ──
+    const FLAT_DELIVERY = Number(this.config.get("DELIVERY_FEE") ?? 2500);
+    let deliveryFee = isDelivery ? FLAT_DELIVERY : 0;
+    if (deliveryWaived) deliveryFee = 0;
 
-    return created;
-  });
+    // ── 5. Totals ──
+    const roundedDiscount = Math.round(discount * 100) / 100;
+    const total = Math.max(0, subtotal - roundedDiscount + deliveryFee);
 
-  // ── 7. Payment init ──
-  const reference = `${orderNumber}-${Date.now()}`;
-  const amountKobo = Math.round(total * 100);
+    // ── 6. Transaction ──
+    const orderNumber = await nextOrderNumber(this.db);
 
-  let init;
-  try {
-    init = await this.paystack.initialize({
-      email: user.email,
-      amountKobo,
-      reference,
-      callbackUrl: `${this.config.get("API_URL")}/payments/verify?orderId=${order.id}`,
-      metadata: { orderId: order.id, orderNumber, userId },
+    const order = await this.db.$transaction(async (tx) => {
+      const created = await tx.order.create({
+        data: {
+          orderNumber,
+          userId,
+          addressId: addressRow?.id ?? null,
+          promoCodeId: promo?.id ?? null,
+          subtotal: new Prisma.Decimal(subtotal),
+          discount: new Prisma.Decimal(roundedDiscount),
+          deliveryFee: new Prisma.Decimal(deliveryFee),
+          total: new Prisma.Decimal(total),
+          status: "PENDING",                    // ← was IN_PROGRESS
+          type: "SHOP",                         // ← new field
+          deliveryType: isDelivery ? "DELIVERY" : "PICKUP",
+          receiverName: addressRow?.fullName ?? user.name,
+          receiverPhone: dto.phone?.toString(),
+          contactEmail: user.email,
+          deliveryAddress: deliveryAddressText || null,
+          timeline: buildTimeline() as unknown as Prisma.InputJsonValue,
+          items: { create: lineItems.map(({ categoryId, ...rest }) => rest) },
+        },
+        include: {
+          items: true,
+          rating: true,
+          returnRequests: { orderBy: { requestedAt: "desc" }, take: 1 },
+        },
+      });
+
+      for (const line of lineItems) {
+        if (line.variantId) {
+          await tx.productVariant.update({
+            where: { id: line.variantId },
+            data: { stock: { decrement: line.quantity } },
+          });
+        } else {
+          await tx.product.update({
+            where: { id: line.productId },
+            data: { stock: { decrement: line.quantity } },
+          });
+        }
+        await tx.stockMovement.create({
+          data: {
+            productId: line.productId,
+            delta: -line.quantity,
+            reason: "order",
+            reference: created.id,
+          },
+        });
+      }
+
+      // Only increment usedCount if the promo actually did something
+      if (promo && (roundedDiscount > 0 || deliveryWaived)) {
+        await tx.promotion.update({
+          where: { id: promo.id },
+          data: {
+            usedCount: { increment: 1 },
+            totalDiscountGiven: { increment: new Prisma.Decimal(roundedDiscount) },
+            totalOrdersAffected: { increment: 1 },
+            totalSalesMade: { increment: new Prisma.Decimal(total) },
+          },
+        });
+      }
+
+      await tx.cartItem.deleteMany({ where: { cart: { userId } } });
+
+      return created;
     });
-  } catch (err: any) {
-    this.logger.error(`Paystack init failed: ${err.message}`);
-    throw new BadRequestException("Could not start payment. Please try again.");
-  }
 
-  // ── 8. Payment row ──
-  await this.db.payment.create({
-    data: {
-      orderId: order.id,
-      userId,
-      provider: "PAYSTACK",
-      providerRef: init.reference,
-      amount: new Prisma.Decimal(total),
-      currency: this.config.get("CURRENCY") ?? "NGN",
-      status: "PENDING",
-      metadata: {
-        orderNumber,
+    // ── 7. Payment init ──
+    const reference = `${orderNumber}-${Date.now()}`;
+    const amountKobo = Math.round(total * 100);
+
+    let init;
+    try {
+      init = await this.paystack.initialize({
+        email: user.email,
         amountKobo,
-        discount: roundedDiscount,
-        deliveryFee,
-        subtotal,
-      },
-    },
-  });
+        reference,
+        callbackUrl: `${this.config.get("API_URL")}/payments/verify?orderId=${order.id}`,
+        metadata: { orderId: order.id, orderNumber, userId },
+      });
+    } catch (err: any) {
+      this.logger.error(`Paystack init failed: ${err.message}`);
+      throw new BadRequestException("Could not start payment. Please try again.");
+    }
 
-  // ── 9. Response — explicitly include the pricing breakdown ──
-  return {
-    id: order.id,
-    orderNumber,
-    subtotal,
-    discount: roundedDiscount,
-    deliveryFee,
-    total,
-    payment: {
-      reference: init.reference,
-      authorizationUrl: init.authorizationUrl,
-      amount: total,
-      currency: this.config.get("CURRENCY") ?? "NGN",
-    },
-  };
-}
+    // ── 8. Payment row ──
+    await this.db.payment.create({
+      data: {
+        orderId: order.id,
+        userId,
+        provider: "PAYSTACK",
+        providerRef: init.reference,
+        amount: new Prisma.Decimal(total),
+        currency: this.config.get("CURRENCY") ?? "NGN",
+        status: "PENDING",
+        metadata: {
+          orderNumber,
+          amountKobo,
+          discount: roundedDiscount,
+          deliveryFee,
+          subtotal,
+        },
+      },
+    });
+
+    // ── 9. Response — explicitly include the pricing breakdown ──
+    return {
+      id: order.id,
+      orderNumber,
+      subtotal,
+      discount: roundedDiscount,
+      deliveryFee,
+      total,
+      payment: {
+        reference: init.reference,
+        authorizationUrl: init.authorizationUrl,
+        amount: total,
+        currency: this.config.get("CURRENCY") ?? "NGN",
+      },
+    };
+  }
 
   // ─── Verify payment (called on redirect back) ──────────────
 
@@ -378,9 +377,9 @@ export class OrdersService {
         });
         await tx.order.update({
           where: { id: payment.orderId! },
-          data: { status: "IN_PROGRESS" },
+          data: { status: "PENDING" },
         });
-        await advanceTrack(tx, payment.orderId!, "PAYMENT");
+        // await advanceTrack(tx, payment.orderId!, "PAYMENT");
       });
 
       return { status: "SUCCESS", orderId: payment.orderId };
@@ -427,9 +426,8 @@ export class OrdersService {
       });
       await tx.order.update({
         where: { id: payment.orderId! },
-        data: { status: "IN_PROGRESS" },
+        data: { status: "PENDING" },
       });
-      await advanceTrack(tx, payment.orderId!, "PAYMENT");
     });
   }
 
@@ -447,7 +445,7 @@ export class OrdersService {
     if (dto.tab === "cancelled") {
       where.status = { in: ["CANCELLED", "RETURNED"] };
     } else if (dto.tab === "orders") {
-      where.status = { in: ["IN_PROGRESS", "COMPLETED"] };
+      where.status = { in: ["PENDING", "DELIVERED"] };
     } else if (dto.status?.length) {
       where.status = { in: mapFrontendStatuses(dto.status) as any };
     }
@@ -478,7 +476,6 @@ export class OrdersService {
 
   private detailInclude = {
     items: true,
-    trackSteps: { orderBy: { sortOrder: "asc" as const } },
     rating: true,
     returnRequests: {
       orderBy: { requestedAt: "desc" as const },
@@ -498,30 +495,33 @@ export class OrdersService {
   async tracking(userId: string, id: string) {
     const order = await this.db.order.findFirst({
       where: { id, userId },
-      include: { trackSteps: { orderBy: { sortOrder: "asc" } } },
+      include: {
+        items: true,
+        payments: true,
+      },
     });
     if (!order) throw new NotFoundException("Order not found");
     return serializeOrderTracking(order);
   }
-
   // ─── Cancel ─────────────────────────────────────────────────
 
   async cancel(userId: string, id: string, dto: CancelOrderDto) {
     const order = await this.db.order.findFirst({
       where: { id, userId },
-      include: this.detailInclude,
+      include: this.detailInclude, // make sure this no longer includes trackSteps
     });
     if (!order) throw new NotFoundException("Order not found");
 
-    if (order.status !== "IN_PROGRESS") {
+    if (order.status !== "PENDING") {
       throw new BadRequestException(
         `Cannot cancel an order that is ${toFrontendStatus(order.status)}`,
       );
     }
 
-    // Refuse to cancel once it's shipped
-    const shipped = order.trackSteps.find(
-      (t) => t.stepId === "OUT_FOR_DELIVERY" && t.state === "DONE",
+    // Refuse to cancel once it's shipped — read from the timeline column
+    const timeline = readTimeline(order.timeline);
+    const shipped = timeline.some(
+      (s) => s.stepId === "OUT_FOR_DELIVERY" && s.state === "DONE",
     );
     if (shipped) {
       throw new BadRequestException(
@@ -553,12 +553,19 @@ export class OrdersService {
         });
       }
 
+      // Close the timeline and stamp the cancellation
+      const newTimeline = closeTimeline(
+        timeline,
+        `Order cancelled: ${dto.reason}`,
+      );
+
       return tx.order.update({
         where: { id },
         data: {
           status: "CANCELLED",
           cancelledAt: new Date(),
           cancelReason: dto.reason,
+          timeline: newTimeline as unknown as Prisma.InputJsonValue,
         },
         include: this.detailInclude,
       });
@@ -575,7 +582,7 @@ export class OrdersService {
       include: { rating: true },
     });
     if (!order) throw new NotFoundException("Order not found");
-    if (order.status !== "COMPLETED") {
+    if (order.status !== "DELIVERED") {
       throw new BadRequestException("You can only rate completed orders");
     }
     if (order.rating) {
@@ -591,7 +598,6 @@ export class OrdersService {
           comment: dto.comment ?? null,
         },
       });
-      await advanceTrack(tx, id, "RATE");
       return rating;
     });
 
@@ -610,7 +616,7 @@ export class OrdersService {
       include: { items: true, returnRequests: true },
     });
     if (!order) throw new NotFoundException("Order not found");
-    if (order.status !== "COMPLETED") {
+    if (order.status !== "DELIVERED") {
       throw new BadRequestException("Only completed orders can be returned");
     }
     if (order.returnRequests.length > 0) {

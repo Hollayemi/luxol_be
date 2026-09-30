@@ -8,6 +8,7 @@ import axios, { AxiosInstance } from "axios";
 import { DatabaseService } from "../database/database.service.js";
 import { Prisma } from "../generated/prisma/client.js";
 import { ConfigService } from "@nestjs/config";
+import { markPaymentConfirmed, OrderStep } from "../orders/order-timeline.js";
 
 interface InitializeParams {
   email: string;
@@ -107,111 +108,111 @@ export class PaystackService {
   }
 
   async confirmPayment(reference: string) {
-  console.log("=======>", reference)
-  const verify = await this.verify(reference);
+    console.log("=======>", reference)
+    const verify = await this.verify(reference);
 
-  if (verify.status !== "success") {
-    await this.db.payment.updateMany({
+    if (verify.status !== "success") {
+      await this.db.payment.updateMany({
+        where: { providerRef: reference },
+        data: {
+          status: "FAILED",
+          failureReason: verify.raw?.gateway_response ?? "Payment not successful",
+          metadata: {
+            ...(verify.metadata ?? {}),
+            paystackStatus: verify.status,
+            verifyRaw: verify.raw,
+          } as Prisma.InputJsonValue,
+        },
+      });
+
+      throw new BadRequestException(
+        verify.raw?.gateway_response ?? "Payment was not successful",
+      );
+    }
+
+    // 3. Find the payment + order it belongs to
+    const payment = await this.db.payment.findUnique({
       where: { providerRef: reference },
-      data: {
-        status: "FAILED",
-        failureReason: verify.raw?.gateway_response ?? "Payment not successful",
-        metadata: {
-          ...(verify.metadata ?? {}),
-          paystackStatus: verify.status,
-          verifyRaw: verify.raw,
-        } as Prisma.InputJsonValue,
-      },
+      include: { order: true },
     });
 
-    throw new BadRequestException(
-      verify.raw?.gateway_response ?? "Payment was not successful",
-    );
+    if (!payment) throw new NotFoundException("Payment not found");
+    if (!payment.order) throw new NotFoundException("Order not found for this payment");
+
+    // 4. Guard against double-processing (webhooks + client verify both call this)
+    if (payment.status === "SUCCESS") {
+      this.logger.warn(`Payment ${reference} already confirmed; skipping`);
+      return `${this.config.get("FRONTEND_URL")}/orders?order=${payment.order.id}`
+
+    }
+
+    // 5. Sanity-check the amount — Paystack sends kobo
+    const expectedKobo = Math.round(Number(payment.amount) * 100);
+    if (verify.amountKobo !== expectedKobo) {
+      this.logger.error(
+        `Amount mismatch for ${reference}: expected ${expectedKobo}, got ${verify.amountKobo}`,
+      );
+      await this.db.payment.update({
+        where: { id: payment.id },
+        data: {
+          status: "FAILED",
+          failureReason: "Amount mismatch",
+        },
+      });
+      throw new BadRequestException("Payment amount does not match order total");
+    }
+
+    // 6. Update everything atomically
+    const updated = await this.db.$transaction(async (tx) => {
+      const pay = await tx.payment.update({
+        where: { id: payment.id },
+        data: {
+          status: "SUCCESS",
+          metadata: {
+            ...(payment.metadata as any),
+            paidAt: verify.paidAt,
+            channel: verify.channel,
+            customerEmail: verify.customerEmail,
+            authorization: verify.raw?.authorization,
+            fees: verify.raw?.fees ?? null,
+          } as Prisma.InputJsonValue,
+        },
+      });
+
+      const order = await tx.order.update({
+        where: { id: payment.orderId! },
+        data: { status: "PENDING" },
+      });
+
+      const newTimeline = markPaymentConfirmed(
+        order.timeline as unknown as OrderStep[],
+        verify.paidAt ?? new Date().toISOString(),
+      );
+
+      await tx.order.update({
+        where: { id: order.id },
+        data: { timeline: newTimeline as unknown as Prisma.InputJsonValue },
+      });
+
+      // Notify the customer (fire and forget — do not throw on failure)
+      await tx.notification.create({
+        data: {
+          userId: order.userId,
+          orderId: order.id,
+          channel: "EMAIL",
+          status: "PENDING",
+          subject: `Payment confirmed for order ${order.orderNumber}`,
+          body: `We received your payment. Your order is being prepared.`,
+        },
+      });
+
+      return { pay, order };
+    });
+
+    this.logger.log(`Payment confirmed: ${reference} → order ${updated.order.orderNumber}`);
+
+    // 7. Return the redirect URL the frontend uses
+    const frontendUrl = this.config.get<string>("FRONTEND_URL") ?? "http://localhost:3000";
+    return `${frontendUrl}/orders?order=${updated.order.id}`
   }
-
-  // 3. Find the payment + order it belongs to
-  const payment = await this.db.payment.findUnique({
-    where: { providerRef: reference },
-    include: { order: true },
-  });
-
-  if (!payment) throw new NotFoundException("Payment not found");
-  if (!payment.order) throw new NotFoundException("Order not found for this payment");
-
-  // 4. Guard against double-processing (webhooks + client verify both call this)
-  if (payment.status === "SUCCESS") {
-    this.logger.warn(`Payment ${reference} already confirmed; skipping`);
-    return `${this.config.get("FRONTEND_URL")}/orders?order=${payment.order.id}`
-
-  }
-
-  // 5. Sanity-check the amount — Paystack sends kobo
-  const expectedKobo = Math.round(Number(payment.amount) * 100);
-  if (verify.amountKobo !== expectedKobo) {
-    this.logger.error(
-      `Amount mismatch for ${reference}: expected ${expectedKobo}, got ${verify.amountKobo}`,
-    );
-    await this.db.payment.update({
-      where: { id: payment.id },
-      data: {
-        status: "FAILED",
-        failureReason: "Amount mismatch",
-      },
-    });
-    throw new BadRequestException("Payment amount does not match order total");
-  }
-
-  // 6. Update everything atomically
-  const updated = await this.db.$transaction(async (tx) => {
-    const pay = await tx.payment.update({
-      where: { id: payment.id },
-      data: {
-        status: "SUCCESS",
-        metadata: {
-          ...(payment.metadata as any),
-          paidAt: verify.paidAt,
-          channel: verify.channel,
-          customerEmail: verify.customerEmail,
-          authorization: verify.raw?.authorization,
-          fees: verify.raw?.fees ?? null,
-        } as Prisma.InputJsonValue,
-      },
-    });
-
-    const order = await tx.order.update({
-      where: { id: payment.orderId! },
-      data: { status: "IN_PROGRESS" },
-    });
-
-    // Advance the track step: PAYMENT done, PACKED active
-    await tx.orderTrackStep.updateMany({
-      where: { orderId: order.id, stepId: "PAYMENT" },
-      data: { state: "DONE", occurredAt: verify.paidAt ?? new Date() },
-    });
-    await tx.orderTrackStep.updateMany({
-      where: { orderId: order.id, stepId: "PACKED", state: "PENDING" },
-      data: { state: "ACTIVE" },
-    });
-
-    // Notify the customer (fire and forget — do not throw on failure)
-    await tx.notification.create({
-      data: {
-        userId: order.userId,
-        orderId: order.id,
-        channel: "EMAIL",
-        status: "PENDING",
-        subject: `Payment confirmed for order ${order.orderNumber}`,
-        body: `We received your payment. Your order is being prepared.`,
-      },
-    });
-
-    return { pay, order };
-  });
-
-  this.logger.log(`Payment confirmed: ${reference} → order ${updated.order.orderNumber}`);
-
-  // 7. Return the redirect URL the frontend uses
-  const frontendUrl = this.config.get<string>("FRONTEND_URL") ?? "http://localhost:3000";
-  return `${frontendUrl}/orders?order=${updated.order.id}`
-}
 }
