@@ -14,6 +14,8 @@ import { CartModule } from './cart/cart.module.js';
 import { PromotionsModule } from './promotions/promotion.module.js';
 import { OrdersModule } from './orders/orders.module.js';
 import { PaymentsModule } from './payments/payments.module.js';
+import { MembershipModule } from './membership/membership.module.js';
+import { DeliveriesModule } from './deliveries/deliveries.module.js';
 
 export const { ObserveModule, ObserveInstrument } = createObserveModule();
 
@@ -30,6 +32,8 @@ export const { ObserveModule, ObserveInstrument } = createObserveModule();
     PromotionsModule,
     OrdersModule,
     PaymentsModule,
+    MembershipModule,
+    DeliveriesModule,
     // ObserveModule.forRoot({
     //   appKey: 'Ovb9DPHg&zOypzWs',
     //   appSecret: 'v6fzLl22$XB$GbtmzXM^roiVoQefjrK9^ELcx$$nFZnTX',

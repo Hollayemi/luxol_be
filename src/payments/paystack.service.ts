@@ -136,15 +136,15 @@ export class PaystackService {
       include: { order: true },
     });
 
+    console.log({payment})
     if (!payment) throw new NotFoundException("Payment not found");
-    if (!payment.order) throw new NotFoundException("Order not found for this payment");
+    // if (!payment.order) throw new NotFoundException("Order not found for this payment");
 
     // 4. Guard against double-processing (webhooks + client verify both call this)
-    if (payment.status === "SUCCESS") {
-      this.logger.warn(`Payment ${reference} already confirmed; skipping`);
-      return `${this.config.get("FRONTEND_URL")}/orders?order=${payment.order.id}`
-
-    }
+    // if (payment.status === "SUCCESS") {
+    //   this.logger.warn(`Payment ${reference} already confirmed; skipping`);
+    //   return `${this.config.get("FRONTEND_URL")}/orders?order=${payment.order.id}`
+    // }
 
     // 5. Sanity-check the amount — Paystack sends kobo
     const expectedKobo = Math.round(Number(payment.amount) * 100);
@@ -164,6 +164,7 @@ export class PaystackService {
 
     // 6. Update everything atomically
     const updated = await this.db.$transaction(async (tx) => {
+      let result;
       const pay = await tx.payment.update({
         where: { id: payment.id },
         data: {
@@ -179,40 +180,66 @@ export class PaystackService {
         },
       });
 
-      const order = await tx.order.update({
-        where: { id: payment.orderId! },
-        data: { status: "PENDING" },
-      });
+      if (payment.subscriptionId) {
+        result = await tx.subscription.update({
+          where: { id: payment.subscriptionId },
+          data: { status: "ACTIVE" },
+        });
 
-      const newTimeline = markPaymentConfirmed(
-        order.timeline as unknown as OrderStep[],
-        verify.paidAt ?? new Date().toISOString(),
-      );
+        // await tx.notification.create({
+        //   data: {
+        //     userId: result.userId,
+        //     orderId: result.id,
+        //     channel: "EMAIL",
+        //     status: "PENDING",
+        //     subject: `Payment confirmed for subscription ${result.planId}`,
+        //     body: `We received your payment. Your order is being prepared.`,
+        //   },
+        // });
+      }
 
-      await tx.order.update({
-        where: { id: order.id },
-        data: { timeline: newTimeline as unknown as Prisma.InputJsonValue },
-      });
+      if (payment.orderId) {
+        const result = await tx.order.update({
+          where: { id: payment.orderId! },
+          data: { status: "PENDING" },
+        });
 
-      // Notify the customer (fire and forget — do not throw on failure)
-      await tx.notification.create({
-        data: {
-          userId: order.userId,
-          orderId: order.id,
-          channel: "EMAIL",
-          status: "PENDING",
-          subject: `Payment confirmed for order ${order.orderNumber}`,
-          body: `We received your payment. Your order is being prepared.`,
-        },
-      });
 
-      return { pay, order };
+        const newTimeline = markPaymentConfirmed(
+          result.timeline as unknown as OrderStep[],
+          verify.paidAt ?? new Date().toISOString(),
+        );
+
+        await tx.order.update({
+          where: { id: result.id },
+          data: { timeline: newTimeline as unknown as Prisma.InputJsonValue },
+        });
+
+        // Notify the customer (fire and forget — do not throw on failure)
+        await tx.notification.create({
+          data: {
+            userId: result.userId,
+            orderId: result.id,
+            channel: "EMAIL",
+            status: "PENDING",
+            subject: `Payment confirmed for order ${result.orderNumber}`,
+            body: `We received your payment. Your order is being prepared.`,
+          },
+        });
+
+      }
+      return { pay, result };
+
     });
 
-    this.logger.log(`Payment confirmed: ${reference} → order ${updated.order.orderNumber}`);
+    this.logger.log(`Payment confirmed: ${reference} → order ${updated?.result?.id}`);
 
-    // 7. Return the redirect URL the frontend uses
     const frontendUrl = this.config.get<string>("FRONTEND_URL") ?? "http://localhost:3000";
-    return `${frontendUrl}/orders?order=${updated.order.id}`
+
+    const redirectUrl = payment.subscriptionId
+      ? `${frontendUrl}/subscription/checkout?subscription=${payment.id}`
+      : `${frontendUrl}/orders?order=${updated?.result?.id}`;
+
+    return redirectUrl
   }
 }
