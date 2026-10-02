@@ -23,12 +23,13 @@ async function bootstrap() {
   );
 
   const logger = new Logger
-
+  
   app.useGlobalInterceptors(new ResponseInterceptor());
   app.useGlobalFilters(new HttpExceptionFilter(logger));
 
-  // app.set("trust proxy", 1);
+  
 
   await app.listen(process.env.PORT ?? 5001);
+  await app.listen(process.env.PORT ?? 5001, '0.0.0.0');
 }
 bootstrap();
