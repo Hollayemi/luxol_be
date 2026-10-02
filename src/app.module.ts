@@ -16,6 +16,8 @@ import { OrdersModule } from './orders/orders.module.js';
 import { PaymentsModule } from './payments/payments.module.js';
 import { MembershipModule } from './membership/membership.module.js';
 import { DeliveriesModule } from './deliveries/deliveries.module.js';
+import { OverviewModule } from './overview/overview.module.js';
+import { SettingsModule } from './settings/settings.module.js';
 
 export const { ObserveModule, ObserveInstrument } = createObserveModule();
 
@@ -34,6 +36,8 @@ export const { ObserveModule, ObserveInstrument } = createObserveModule();
     PaymentsModule,
     MembershipModule,
     DeliveriesModule,
+    OverviewModule,
+    SettingsModule,
     // ObserveModule.forRoot({
     //   appKey: 'Ovb9DPHg&zOypzWs',
     //   appSecret: 'v6fzLl22$XB$GbtmzXM^roiVoQefjrK9^ELcx$$nFZnTX',

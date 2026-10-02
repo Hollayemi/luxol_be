@@ -23,7 +23,7 @@ import { PaystackService } from "../payments/paystack.service.js";
 import { Prisma, PromotionStatus } from "../generated/prisma/client.js";
 import { nextOrderNumber } from "../common/utils/code.util.js";
 import { cartDiscount } from "../promotions/promotion-calc.js";
-import { buildTimeline, closeTimeline } from "./order-timeline.js";
+import { buildTimeline, canRate, closeTimeline, markRated } from "./order-timeline.js";
 
 @Injectable()
 export class OrdersService {
@@ -438,14 +438,13 @@ export class OrdersService {
     const pageSize = dto.pageSize ?? 10;
     const skip = (page - 1) * pageSize;
 
-    console.log("heeeeeereeeee in order")
 
     const where: Prisma.OrderWhereInput = { userId };
 
     if (dto.tab === "cancelled") {
-      where.status = { in: ["CANCELLED", "RETURNED"] };
+      where.status = { in: ["CANCELLED", "RETURNED", "REFUNDED"] };
     } else if (dto.tab === "orders") {
-      where.status = { in: ["PENDING", "DELIVERED"] };
+      where.status = { in: ["PENDING", "DELIVERED", "OUT_FOR_DELIVERY", "PROCESSING"] };
     } else if (dto.status?.length) {
       where.status = { in: mapFrontendStatuses(dto.status) as any };
     }
@@ -589,17 +588,27 @@ export class OrdersService {
       throw new BadRequestException("This order has already been rated");
     }
 
-    const created = await this.db.$transaction(async (tx) => {
-      const rating = await tx.orderRating.create({
+    const timeline = readTimeline(order.timeline);
+    if (!canRate(timeline)) {
+      throw new BadRequestException("This order cannot be rated yet");
+    }
+
+    const newTimeline = markRated(timeline);
+
+    const [created] = await this.db.$transaction([
+      this.db.orderRating.create({
         data: {
           orderId: id,
           userId,
           stars: dto.stars,
-          comment: dto.comment ?? null,
+          comment: dto.comment,
         },
-      });
-      return rating;
-    });
+      }),
+      this.db.order.update({
+        where: { id },
+        data: { timeline: newTimeline as unknown as Prisma.InputJsonValue },
+      }),
+    ]);
 
     return {
       stars: created.stars,

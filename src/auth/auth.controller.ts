@@ -1,4 +1,5 @@
-import { Body, Controller, Get, Post, UseGuards } from "@nestjs/common";
+import { Body, Controller, Get, Post, Req, UseGuards } from "@nestjs/common";
+import type { Request } from "express";
 
 import { ForgotPasswordDto, GoogleDto, LoginDto, RegisterDto, ResetPasswordDto } from "./dto/register.dto.js";
 import { JwtAuthGuard } from "./guards/jwt-auth.guard.js";
@@ -15,8 +16,11 @@ export class AuthController {
   }
 
   @Post("login")
-  login(@Body() dto: LoginDto) {
-    return this.auth.login(dto);
+  login(@Body() dto: LoginDto, @Req() req: Request) {
+    const userAgent = req.get("user-agent") ?? undefined;
+    const forwardedFor = req.get("x-forwarded-for") ?? undefined;
+
+    return this.auth.login(dto, userAgent, forwardedFor);
   }
 
   @Post("google")

@@ -8,11 +8,14 @@ import {
 import { JwtService } from "@nestjs/jwt";
 import * as bcrypt from "bcrypt";
 import { OAuth2Client } from "google-auth-library";
-import { randomBytes } from "crypto";
+import { randomBytes, createHash } from "crypto";
 import { DatabaseService } from "../database/database.service.js";
 import { LoginDto, RegisterDto } from "./dto/register.dto.js";
 import { Role } from "../generated/prisma/enums.js";
+import { detectDevice } from "../common/utils/device.util.js";
 
+const sessionToken = randomBytes(32).toString("hex");
+const tokenHash = createHash("sha256").update(sessionToken).digest("hex");
 const googleClient = new OAuth2Client(process.env.AUTH_GOOGLE_ID);
 
 @Injectable()
@@ -22,7 +25,7 @@ export class AuthService {
     private jwt: JwtService,
   ) { }
 
-  private sign(user: { id: string; email: string; role: string }) {
+  private sign(user: { id: string; email: string; role: string, sessionTokenHash?: string }) {
     return this.jwt.sign({ sub: user.id, email: user.email, role: user.role });
   }
 
@@ -60,7 +63,8 @@ export class AuthService {
 
 
 
-  async login(dto: LoginDto) {
+  async login(dto: LoginDto, userAgent: string | undefined, ip: string | undefined) {
+    console.log({ userAgent, ip })
     const user = await this.db.user.findUnique({
       where: { email: dto.email.toLowerCase() },
     });
@@ -68,26 +72,71 @@ export class AuthService {
       throw new UnauthorizedException("Invalid credentials");
 
     const ok = await bcrypt.compare(dto.password, user.passwordHash);
-    if (!ok) throw new UnauthorizedException("Invalid credentials");
-    console.log(dto)
+    if (!ok) {
+      await this.db.loginActivity.create({
+        data: {
+          userId: user?.id ?? null,
+          email: dto.email.toLowerCase(),
+          outcome: "FAILED",
+          device: detectDevice(userAgent),
+          ipAddress: ip,
+          reason: "Invalid credentials",
+        }
+      })
+      throw new UnauthorizedException("Invalid credentials")
+    }
 
     if (dto.type === 'admin')
-      if (user.role !== Role.ADMIN && user.role !== Role.SUPER_ADMIN)
+      if (user.role !== Role.ADMIN && user.role !== Role.SUPER_ADMIN) {
         throw new ForbiddenException("Not an admin account");
+      }
 
-    if (!user.isActive)
+    if (!user.isActive) {
+      await this.db.loginActivity.create({
+        data: {
+          userId: user?.id ?? null,
+          email: dto.email.toLowerCase(),
+          outcome: "FAILED",
+          device: detectDevice(userAgent),
+          ipAddress: ip,
+          reason: "Account disabled",
+        }
+      })
       throw new ForbiddenException("Account disabled");
+    }
+
+
 
     await this.db.user.update({
       where: { id: user.id },
       data: { lastLoginAt: new Date() },
     });
 
+    await this.db.loginActivity.create({
+      data: {
+        userId: user?.id ?? null,
+        email: dto.email.toLowerCase(),
+        outcome: "SUCCESS",
+        device: detectDevice(userAgent),
+        ipAddress: ip,
+        reason: "Logged in successfully",
+      },
+    });
+    await this.db.adminSession.create({
+      data: {
+        userId: user.id,
+        tokenHash,
+        device: detectDevice(userAgent),
+        userAgent,
+        ipAddress: ip,
+      },
+    });
+
     return {
       message: "Logged in",
       data: {
         user: this.sanitize(user),
-        accessToken: this.sign(user),
+        accessToken: this.sign({ ...user, sessionTokenHash: tokenHash, }),
       },
     };
   }
@@ -201,5 +250,27 @@ export class AuthService {
     const user = await this.db.user.findUnique({ where: { id: userId } });
     if (!user) throw new NotFoundException("User not found");
     return { message: "OK", data: this.sanitize(user) };
+  }
+
+  async validate(payload: { sub: string; sessionTokenHash?: string }) {
+    const user = await this.db.user.findUnique({ where: { id: payload.sub } });
+    if (!user || !user.isActive) throw new UnauthorizedException();
+
+    if (payload.sessionTokenHash) {
+      const session = await this.db.adminSession.findUnique({
+        where: { tokenHash: payload.sessionTokenHash },
+      });
+      if (!session || session.revokedAt) {
+        throw new UnauthorizedException("Session revoked");
+      }
+      // Bump activity
+      await this.db.adminSession.update({
+        where: { id: session.id },
+        data: { lastActiveAt: new Date() },
+      });
+      return { ...user, sessionTokenHash: payload.sessionTokenHash };
+    }
+
+    return user;
   }
 }

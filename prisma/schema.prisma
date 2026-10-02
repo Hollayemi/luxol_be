@@ -13,8 +13,24 @@ datasource db {
 
 enum Role {
   CUSTOMER
-  ADMIN
   SUPER_ADMIN
+  ADMIN
+  OPERATIONS_MANAGER
+  INVENTORY_MANAGER
+  SUPPORT
+}
+
+// ── Team member status
+enum TeamMemberStatus {
+  ACTIVE
+  INVITED
+  SUSPENDED
+}
+
+enum LoginOutcome {
+  SUCCESS
+  FAILED
+  LOCKED
 }
 
 enum CustomerStatus {
@@ -187,6 +203,17 @@ model User {
   createdAt     DateTime  @default(now())
   updatedAt     DateTime  @updatedAt
 
+  bio               String?
+  teamStatus        TeamMemberStatus @default(ACTIVE)
+  passwordChangedAt DateTime?
+  twoFactorEnabled  Boolean          @default(false)
+  twoFactorSecret   String? // encrypted, added when you build 2FA
+
+  adminSessions           AdminSession[]
+  loginActivities         LoginActivity[]
+  notificationPreferences NotificationPreference[]
+  notificationSettings    AdminNotificationSettings?
+
   // Auth
   oauthAccounts       OAuthAccount[]
   passwordResetTokens PasswordResetToken[]
@@ -258,6 +285,67 @@ model CustomerActivity {
   @@index([userId, occurredAt])
 }
 
+model AdminSession {
+  id           String    @id @default(cuid())
+  userId       String
+  tokenHash    String    @unique
+  device       String               // "Chrome on Windows"
+  userAgent    String?
+  ipAddress    String?
+  createdAt    DateTime  @default(now())
+  lastActiveAt DateTime  @default(now())
+  revokedAt    DateTime?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, revokedAt])
+  @@index([tokenHash])
+}
+
+
+model LoginActivity {
+  id        String       @id @default(cuid())
+  userId    String?
+  email     String // captured even for failed logins
+  outcome   LoginOutcome
+  device    String?
+  ipAddress String?
+  location  String?
+  reason    String? // "wrong password", "account locked"
+  createdAt DateTime     @default(now())
+
+  user User? @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([userId, createdAt])
+  @@index([email, createdAt])
+}
+
+// ── Notification preferences (per admin)
+model NotificationPreference {
+  id        String   @id @default(cuid())
+  userId    String
+  key       String // "orders.new"
+  email     Boolean  @default(true)
+  push      Boolean  @default(true)
+  updatedAt DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, key])
+}
+
+model AdminNotificationSettings {
+  id           String   @id @default(cuid())
+  userId       String   @unique
+  quietHoursOn Boolean  @default(false)
+  quietStart   String   @default("22:00")
+  quietEnd     String   @default("07:00")
+  sound        String   @default("chime")
+  updatedAt    DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
 // ─────────────────────────────────────────────────────────────
 // ADMIN INVITATIONS
 // ─────────────────────────────────────────────────────────────
@@ -271,6 +359,7 @@ model AdminInvitation {
   expiresAt   DateTime
   acceptedAt  DateTime?
   createdAt   DateTime  @default(now())
+  revokedAt    DateTime?
 
   invitedBy User? @relation("AdminInviter", fields: [invitedById], references: [id], onDelete: SetNull)
 

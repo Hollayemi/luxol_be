@@ -6,6 +6,7 @@ import { OrderStep, sortTimeline, STEP_META } from "./order-timeline.js";
 const STATUS_MAP: Record<string, string> = {
   IN_PROGRESS: "in-progress",
   COMPLETED: "completed",
+  DELIVERED: "completed",
   CANCELLED: "cancelled",
   RETURNED: "returned",
 };
