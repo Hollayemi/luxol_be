@@ -211,6 +211,7 @@ model User {
 
   adminSessions           AdminSession[]
   loginActivities         LoginActivity[]
+  webPushSubscriptions    WebPushSubscription[]
   notificationPreferences NotificationPreference[]
   notificationSettings    AdminNotificationSettings?
 
@@ -289,7 +290,7 @@ model AdminSession {
   id           String    @id @default(cuid())
   userId       String
   tokenHash    String    @unique
-  device       String               // "Chrome on Windows"
+  device       String // "Chrome on Windows"
   userAgent    String?
   ipAddress    String?
   createdAt    DateTime  @default(now())
@@ -301,7 +302,6 @@ model AdminSession {
   @@index([userId, revokedAt])
   @@index([tokenHash])
 }
-
 
 model LoginActivity {
   id        String       @id @default(cuid())
@@ -359,7 +359,7 @@ model AdminInvitation {
   expiresAt   DateTime
   acceptedAt  DateTime?
   createdAt   DateTime  @default(now())
-  revokedAt    DateTime?
+  revokedAt   DateTime?
 
   invitedBy User? @relation("AdminInviter", fields: [invitedById], references: [id], onDelete: SetNull)
 
@@ -768,10 +768,12 @@ model Subscription {
 
   payments Payment[]
 
-  address Address?         @relation(fields: [addressId], references: [id])
-  user    User             @relation(fields: [userId], references: [id], onDelete: Cascade)
-  plan    MembershipPlan   @relation(fields: [planId], references: [id])
-  mix     ProteinMixItem[]
+  address Address?       @relation(fields: [addressId], references: [id])
+  user    User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  plan    MembershipPlan @relation(fields: [planId], references: [id])
+
+  mix           ProteinMixItem[]
+  notifications Notification[]
 
   @@index([status])
   @@index([nextBillingAt])
@@ -851,22 +853,43 @@ model Payment {
 // ─────────────────────────────────────────────────────────────
 
 model Notification {
-  id        String              @id @default(cuid())
-  userId    String?
-  orderId   String?
-  channel   NotificationChannel
-  status    NotificationStatus  @default(PENDING)
-  subject   String?
-  body      String
-  metadata  Json?
-  sentAt    DateTime?
-  createdAt DateTime            @default(now())
+  id             String              @id @default(cuid())
+  userId         String?
+  orderId        String?
+  subscriptionId String?
+  channel        NotificationChannel
+  status         NotificationStatus  @default(PENDING)
+  subject        String?
+  body           String
+  metadata       Json?
+  sentAt         DateTime?
+  createdAt      DateTime            @default(now())
 
-  user  User?  @relation(fields: [userId], references: [id], onDelete: Cascade)
-  order Order? @relation(fields: [orderId], references: [id], onDelete: SetNull)
+  isOpened      Boolean @default(false)
+  failureReason String?
+
+  user         User?         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  order        Order?        @relation(fields: [orderId], references: [id], onDelete: SetNull)
+  subscription Subscription? @relation(fields: [subscriptionId], references: [id], onDelete: SetNull)
 
   @@index([userId])
   @@index([status])
+  @@index([userId, createdAt])
+}
+
+model WebPushSubscription {
+  id         String    @id @default(cuid())
+  userId     String
+  endpoint   String    @unique
+  p256dh     String
+  auth       String
+  userAgent  String?
+  createdAt  DateTime  @default(now())
+  lastUsedAt DateTime?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
 }
 
 // ─────────────────────────────────────────────────────────────

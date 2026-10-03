@@ -22,7 +22,7 @@ import { Roles } from "../auth/decorators/roles.decorator.js";
 import { CurrentUser } from "../auth/decorators/current-user.decorator.js";
 import { ProfileService } from "./profile.service.js";
 import { SecurityService } from "./security.service.js";
-import { NotificationsService } from "./notifications.service.js";
+import { AdminNotificationsService } from "./notifications.service.js";
 import { TeamService } from "./team.service.js";
 import { UpdateAdminProfileDto } from "./dto/update-profile.dto.js";
 import { ChangeAdminPasswordDto } from "./dto/change-password.dto.js";
@@ -47,7 +47,7 @@ export class AdminSettingsController {
   constructor(
     private profile: ProfileService,
     private security: SecurityService,
-    private notifications: NotificationsService,
+    private notifications: AdminNotificationsService,
     private team: TeamService,
   ) {}
 
@@ -198,9 +198,9 @@ export class AdminSettingsController {
 @UseGuards(JwtAuthGuard, RolesGuard)
 @Roles(...STAFF)
 @Controller("admin/invitations")
+
 export class AdminInvitationsController {
   constructor(private team: TeamService) {}
-
   @Post()
   async invite(
     @Body() dto: InviteAdminUserDto,

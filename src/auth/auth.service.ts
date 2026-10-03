@@ -13,9 +13,8 @@ import { DatabaseService } from "../database/database.service.js";
 import { LoginDto, RegisterDto } from "./dto/register.dto.js";
 import { Role } from "../generated/prisma/enums.js";
 import { detectDevice } from "../common/utils/device.util.js";
+import { NotificationsService } from "../notification/notifications.service.js";
 
-const sessionToken = randomBytes(32).toString("hex");
-const tokenHash = createHash("sha256").update(sessionToken).digest("hex");
 const googleClient = new OAuth2Client(process.env.AUTH_GOOGLE_ID);
 
 @Injectable()
@@ -23,6 +22,7 @@ export class AuthService {
   constructor(
     private db: DatabaseService,
     private jwt: JwtService,
+    private notifications: NotificationsService,
   ) { }
 
   private sign(user: { id: string; email: string; role: string, sessionTokenHash?: string }) {
@@ -38,6 +38,7 @@ export class AuthService {
     const existing = await this.db.user.findUnique({
       where: { email: dto.email.toLowerCase() },
     });
+
     if (existing) throw new ConflictException("Email already in use");
 
     const passwordHash = await bcrypt.hash(dto.password, 12);
@@ -49,8 +50,27 @@ export class AuthService {
       },
     });
 
-    console.log("JWT_SECRET set:", !!process.env.JWT_SECRET);
-    console.log("JWT_SECRET length:", process.env.JWT_SECRET);
+    const token = randomBytes(32).toString("hex");
+    const expiresAt = new Date(Date.now() + 1000 * 60 * 60); // 1 hour
+
+    await this.db.passwordResetToken.create({
+      data: { userId: user.id, token, expiresAt },
+    });
+
+    await this.notifications.notifyTemplate("AUTH_WELCOME", {
+      userId: user.id,
+      context: {
+        firstName: user.name.split(" ")[0],
+      },
+    });
+
+    await this.notifications.notifyTemplate("AUTH_EMAIL_VERIFICATION", {
+      userId: user.id,
+      context: {
+        firstName: user.name.split(" ")[0],
+        verifyUrl: `${process.env.API_URL}/auth/verify-email?token=${token}`,
+      },
+    });
 
     return {
       message: "Account created",
@@ -122,6 +142,11 @@ export class AuthService {
         reason: "Logged in successfully",
       },
     });
+
+
+    const sessionToken = randomBytes(32).toString("hex");
+    const tokenHash = createHash("sha256").update(sessionToken).digest("hex");
+
     await this.db.adminSession.create({
       data: {
         userId: user.id,
@@ -131,6 +156,16 @@ export class AuthService {
         ipAddress: ip,
       },
     });
+
+    await this.notifications.notifyTemplate("AUTH_NEW_DEVICE_LOGIN", {
+      userId: user.id,
+      context: {
+        firstName: user.name.split(" ")[0],
+        device: detectDevice(userAgent),
+        ip: ip ?? "Unknown",
+      },
+    });
+
 
     return {
       message: "Logged in",
@@ -216,10 +251,44 @@ export class AuthService {
       data: { userId: user.id, token, expiresAt },
     });
 
-    // TODO: send email with `${FRONTEND_URL}/reset-password?token=${token}`
-    // Wire this to Resend/Nodemailer once you're ready.
+
+
+    await this.notifications.notifyTemplate("AUTH_PASSWORD_RESET", {
+      userId: user.id,
+      context: {
+        firstName: user.name.split(" ")[0],
+        resetUrl: `${process.env.FRONTEND_URL}/reset-password?token=${token}`,
+      },
+    });
+
 
     return { message: "If that email exists, a reset link was sent" };
+  }
+
+  async verifyEmail(token: string) {
+    const record = await this.db.passwordResetToken.findUnique({
+      where: { token },
+    });
+    if (!record || record.usedAt || record.expiresAt < new Date())
+      throw new NotFoundException("Invalid or expired token");
+
+    await this.db.$transaction([
+      this.db.user.update({
+        where: { id: record.userId },
+        data: { 
+          emailVerified: new Date(),
+          isActive: true, 
+
+        },
+      }),
+
+      this.db.passwordResetToken.update({
+        where: { id: record.id },
+        data: { usedAt: new Date() },
+      }),
+    ]);
+
+    return true;
   }
 
   async resetPassword(token: string, password: string) {

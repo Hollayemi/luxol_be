@@ -4,7 +4,7 @@ import { serializeNotificationSettings } from "./settings.serializer.js";
 import { DatabaseService } from "../database/database.service.js";
 
 @Injectable()
-export class NotificationsService {
+export class AdminNotificationsService {
   constructor(private db: DatabaseService) {}
 
   async get(userId: string) {

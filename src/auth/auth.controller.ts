@@ -1,5 +1,5 @@
-import { Body, Controller, Get, Post, Req, UseGuards } from "@nestjs/common";
-import type { Request } from "express";
+import { Body, Controller, Get, Post, Redirect, Req, Res, UseGuards } from "@nestjs/common";
+import type { Request, Response } from "express";
 
 import { ForgotPasswordDto, GoogleDto, LoginDto, RegisterDto, ResetPasswordDto } from "./dto/register.dto.js";
 import { JwtAuthGuard } from "./guards/jwt-auth.guard.js";
@@ -36,6 +36,14 @@ export class AuthController {
   @Post("reset-password")
   reset(@Body() dto: ResetPasswordDto) {
     return this.auth.resetPassword(dto.token, dto.password);
+  }
+
+  @Get("verify-email")
+  @Redirect()
+  verify(@Req() req: Request, @Res() res: Response) {
+    const token = req.query.token as string;
+    const result = this.auth.verifyEmail(token);
+    return res.redirect(302, process.env.FRONTEND_URL || "http://localhost:3000");
   }
 
   @UseGuards(JwtAuthGuard)

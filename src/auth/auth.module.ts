@@ -6,6 +6,10 @@ import { AuthService } from "./auth.service.js";
 import { JwtStrategy } from "./strategies/jwt.strategy.js";
 import { DatabaseService } from "../database/database.service.js";
 import { ConfigModule, ConfigService } from "@nestjs/config";
+import { NotificationsService } from "../notification/notifications.service.js";
+import { EmailZohoAdapter } from "../notification/channels/email-zoho.adapter.js";
+import { WebPushAdapter } from "../notification/channels/webpush.adapter.js";
+import { SmsTermiiAdapter } from "../notification/channels/sms-termii.adapter.js";
 
 @Module({
   imports: [
@@ -20,7 +24,7 @@ import { ConfigModule, ConfigService } from "@nestjs/config";
     }),
   ],
   controllers: [AuthController],
-  providers: [AuthService, DatabaseService, JwtStrategy],
+  providers: [AuthService, DatabaseService, NotificationsService, JwtStrategy, EmailZohoAdapter,SmsTermiiAdapter, WebPushAdapter],
   exports: [AuthService],
 })
 export class AuthModule {}

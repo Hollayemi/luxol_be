@@ -18,6 +18,7 @@ import { MembershipModule } from './membership/membership.module.js';
 import { DeliveriesModule } from './deliveries/deliveries.module.js';
 import { OverviewModule } from './overview/overview.module.js';
 import { SettingsModule } from './settings/settings.module.js';
+import { NotificationModule } from './notification/notification.module.js';
 
 export const { ObserveModule, ObserveInstrument } = createObserveModule();
 
@@ -38,6 +39,7 @@ export const { ObserveModule, ObserveInstrument } = createObserveModule();
     DeliveriesModule,
     OverviewModule,
     SettingsModule,
+    NotificationModule,
     // ObserveModule.forRoot({
     //   appKey: 'Ovb9DPHg&zOypzWs',
     //   appSecret: 'v6fzLl22$XB$GbtmzXM^roiVoQefjrK9^ELcx$$nFZnTX',
