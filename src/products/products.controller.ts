@@ -1,4 +1,4 @@
-import { BadRequestException, Controller, Get, Param, Query, UploadedFile, UploadedFiles, UseInterceptors } from "@nestjs/common";
+import { BadRequestException, Controller, Get, Param, Query, Req, UploadedFile, UploadedFiles, UseInterceptors } from "@nestjs/common";
 import { ProductsService } from "./products.service.js";
 import { ListProductsDto } from "./dto/list-products.dto.js";
 
@@ -62,6 +62,14 @@ export class AdminProductsController {
     return { message: "OK", data: await this.products.listAdmin(dto) };
   }
 
+  @Get("stats")
+  async stats() {
+    return {
+      message: "OK",
+      data: await this.products.inventoryStats(),
+    };
+  }
+
   @Get(":id")
   async detail(@Param("id") id: string) {
     return { message: "OK", data: await this.products.findOne(id) };
@@ -73,11 +81,6 @@ export class AdminProductsController {
     console.log({ dto, images })
     if (!images?.length) throw new BadRequestException('Product Image Required');
     const urls = await this.cloudinary.uploadMany(images);
-    // const urls = [
-    //   'https://res.cloudinary.com/dfhfymr0q/image/upload/v1790425729/lawticha/fft0d58vxvsplshqtfs0.png',
-    // 'https://res.cloudinary.com/dfhfymr0q/image/upload/v1790425729/lawticha/rywxldvpfxje7hvsvnoy.webp',
-    // 'https://res.cloudinary.com/dfhfymr0q/image/upload/v1790425730/lawticha/bfrbjh2vsecc0tnfyrbu.png'
-    // ]
     console.log({urls})
     return {
       message: "Product created",
@@ -93,6 +96,7 @@ export class AdminProductsController {
   }
 
   @Patch(":id")
+  @UseInterceptors(FilesInterceptor('images', 8, { storage: memoryStorage() }))
   async update(@Param("id") id: string, @Body() dto: UpdateProductDto) {
     return {
       message: "Product updated",

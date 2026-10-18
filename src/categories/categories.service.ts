@@ -47,7 +47,7 @@ export class CategoriesService {
       ];
     }
 
-    const [total, rows] = await this.db.$transaction([
+    const [total, rows] =  await Promise.all([
       this.db.category.count({ where }),
       this.db.category.findMany({
         where,

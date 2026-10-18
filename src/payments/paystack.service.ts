@@ -50,7 +50,6 @@ export class PaystackService {
     if (!this.secret) {
       this.logger.warn("PAYSTACK_SECRET_KEY is not set — payments will fail");
     }
-    console.log(this.secret, "=========>")
     this.http = axios.create({
       baseURL: "https://api.paystack.co",
       headers: {
@@ -108,7 +107,6 @@ export class PaystackService {
   }
 
   async confirmPayment(reference: string) {
-    console.log("=======>", reference)
     const verify = await this.verify(reference);
 
     if (verify.status !== "success") {
@@ -136,15 +134,9 @@ export class PaystackService {
       include: { order: true },
     });
 
-    console.log({payment})
     if (!payment) throw new NotFoundException("Payment not found");
     // if (!payment.order) throw new NotFoundException("Order not found for this payment");
 
-    // 4. Guard against double-processing (webhooks + client verify both call this)
-    // if (payment.status === "SUCCESS") {
-    //   this.logger.warn(`Payment ${reference} already confirmed; skipping`);
-    //   return `${this.config.get("FRONTEND_URL")}/orders?order=${payment.order.id}`
-    // }
 
     // 5. Sanity-check the amount — Paystack sends kobo
     const expectedKobo = Math.round(Number(payment.amount) * 100);
@@ -198,6 +190,22 @@ export class PaystackService {
         // });
       }
 
+      if (payment.meatBoxOrderId) {
+        result = await tx.meatBoxOrder.findUnique({
+          where: { id: payment.meatBoxOrderId },
+        });
+
+        if (result && result.status === "PRICE_CONFIRMED") {
+          await tx.meatBoxOrder.update({
+            where: { id: result.id },
+            data: {
+              status: "PROCESSING",
+              paidAt: new Date(),
+            },
+          });
+        }
+      }
+
       if (payment.orderId) {
         const result = await tx.order.update({
           where: { id: payment.orderId! },
@@ -236,9 +244,11 @@ export class PaystackService {
 
     const frontendUrl = this.config.get<string>("FRONTEND_URL") ?? "http://localhost:3000";
 
-    const redirectUrl = payment.subscriptionId
-      ? `${frontendUrl}/subscription/checkout?subscription=${payment.id}`
-      : `${frontendUrl}/orders?order=${updated?.result?.id}`;
+    const redirectUrl = payment.meatBoxOrderId
+      ? `${frontendUrl}/meat-box/manage?meatBoxOrderId=${payment.meatBoxOrderId}`
+      : payment.subscriptionId
+        ? `${frontendUrl}/subscription`
+        : `${frontendUrl}/orders/${payment.orderId}`;
 
     return redirectUrl
   }

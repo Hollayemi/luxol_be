@@ -19,6 +19,7 @@ import { DeliveriesModule } from './deliveries/deliveries.module.js';
 import { OverviewModule } from './overview/overview.module.js';
 import { SettingsModule } from './settings/settings.module.js';
 import { NotificationModule } from './notification/notification.module.js';
+import { MeatBoxModule } from './meat-box/meat-box.module.js';
 
 export const { ObserveModule, ObserveInstrument } = createObserveModule();
 
@@ -40,6 +41,7 @@ export const { ObserveModule, ObserveInstrument } = createObserveModule();
     OverviewModule,
     SettingsModule,
     NotificationModule,
+    MeatBoxModule,
     // ObserveModule.forRoot({
     //   appKey: 'Ovb9DPHg&zOypzWs',
     //   appSecret: 'v6fzLl22$XB$GbtmzXM^roiVoQefjrK9^ELcx$$nFZnTX',

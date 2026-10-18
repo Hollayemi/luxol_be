@@ -18,3 +18,4 @@ export class PaymentsController {
     return res.redirect(302, result);
   }
 }
+

@@ -10,6 +10,11 @@ export class InitializedDto {
     @IsString()
     subscriptionId: string
 
+
+    @IsOptional()
+    @IsString()
+    meatBoxOrderId: string
+
     @IsString()
     trxref: string
     

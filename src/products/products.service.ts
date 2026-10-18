@@ -19,8 +19,8 @@ export class ProductsService {
   constructor(
     private db: DatabaseService,
     private promotionFinder: PromotionFinderService
- 
-  ) {}
+
+  ) { }
 
   private include = {
     category: { select: { id: true, name: true, slug: true } },
@@ -71,15 +71,9 @@ export class ProductsService {
 
     const orderBy = this.resolveSort(dto.sort);
 
-    const [total, rows] = await this.db.$transaction([
+    const [total, rows] = await Promise.all([
       this.db.product.count({ where }),
-      this.db.product.findMany({
-        where,
-        include: this.include,
-        orderBy,
-        skip,
-        take: perPage,
-      }),
+      this.db.product.findMany({ where, include: this.include, orderBy, skip, take: perPage }),
     ]);
 
     // ── One extra query for all applicable promotions ──
@@ -88,9 +82,9 @@ export class ProductsService {
     const promotions =
       productIds.length > 0
         ? await this.promotionFinder.findActiveForProducts({
-            ids: productIds,
-            categoryIds,
-          })
+          ids: productIds,
+          categoryIds,
+        })
         : [];
 
     return {
@@ -202,14 +196,14 @@ export class ProductsService {
           displayOrder: dto.displayOrder ?? 0,
           variants: dto.variants?.length
             ? {
-                create: dto.variants.map((v) => ({
-                  label: v.label,
-                  sku: v.sku ?? `${sku}-${slugify(v.label)}`,
-                  unitPrice: new Prisma.Decimal(v.unitPrice),
-                  stock: v.stock ?? 0,
-                  isDefault: v.isDefault ?? false,
-                })),
-              }
+              create: dto.variants.map((v) => ({
+                label: v.label,
+                sku: v.sku ?? `${sku}-${slugify(v.label)}`,
+                unitPrice: new Prisma.Decimal(v.unitPrice),
+                stock: v.stock ?? 0,
+                isDefault: v.isDefault ?? false,
+              })),
+            }
             : undefined,
         },
         include: this.include,
@@ -251,12 +245,12 @@ export class ProductsService {
       if (skuClash) throw new ConflictException("SKU already in use");
     }
 
+
     const updated = await this.db.$transaction(async (tx) => {
-      // If variants are supplied, replace them wholesale.
-      // Simpler than diffing; skus stay stable via the caller.
       if (dto.variants) {
         await tx.productVariant.deleteMany({ where: { productId: id } });
       }
+
 
       return tx.product.update({
         where: { id },
@@ -292,16 +286,16 @@ export class ProductsService {
           displayOrder: dto.displayOrder ?? undefined,
           variants: dto.variants?.length
             ? {
-                create: dto.variants.map((v) => ({
-                  label: v.label,
-                  sku:
-                    v.sku ??
-                    `${dto.sku ?? existing.sku}-${slugify(v.label)}`,
-                  unitPrice: new Prisma.Decimal(v.unitPrice),
-                  stock: v.stock ?? 0,
-                  isDefault: v.isDefault ?? false,
-                })),
-              }
+              create: dto.variants.map((v) => ({
+                label: v.label,
+                sku:
+                  v.sku ??
+                  `${dto.sku ?? existing.sku}-${slugify(v.label)}`,
+                unitPrice: new Prisma.Decimal(v.unitPrice),
+                stock: v.stock ?? 0,
+                isDefault: v.isDefault ?? false,
+              })),
+            }
             : undefined,
         },
         include: this.include,
@@ -389,5 +383,31 @@ export class ProductsService {
 
     return serializeProducts(rows, promotions);
   }
+  async inventoryStats() {
+    const [totalProducts, inStock, outOfStock, lowStockRow] = await Promise.all([
+      this.db.product.count({ where: { status: "ACTIVE" } }),
+      this.db.product.count({
+        where: { status: "ACTIVE", stock: { gt: 0 } },
+      }),
+      this.db.product.count({
+        where: { status: "ACTIVE", stock: { lte: 0 } },
+      }),
+      this.db.$queryRaw<Array<{ count: number }>>(Prisma.sql`
+      SELECT COUNT(*)::int AS count
+      FROM "Product"
+      WHERE status = 'ACTIVE'
+        AND stock > 0
+        AND stock <= "reorderLevel"
+    `),
+    ]);
 
+    const lowStock = lowStockRow[0]?.count ?? 0;
+
+    return {
+      totalProducts: { value: totalProducts },
+      inStock: { value: inStock },
+      lowStock: { value: lowStock },
+      outOfStock: { value: outOfStock },
+    };
+  }
 }

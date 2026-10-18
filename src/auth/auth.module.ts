@@ -24,7 +24,7 @@ import { SmsTermiiAdapter } from "../notification/channels/sms-termii.adapter.js
     }),
   ],
   controllers: [AuthController],
-  providers: [AuthService, DatabaseService, NotificationsService, JwtStrategy, EmailZohoAdapter,SmsTermiiAdapter, WebPushAdapter],
+  providers: [AuthService, NotificationsService, JwtStrategy, EmailZohoAdapter,SmsTermiiAdapter, WebPushAdapter],
   exports: [AuthService],
 })
 export class AuthModule {}

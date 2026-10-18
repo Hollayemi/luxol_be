@@ -65,6 +65,7 @@ export function serializeOrderSummary(o: {
   id: string;
   placedAt: Date;
   status: string;
+  orderNumber: string;
   deliveryType: string;
   items: { quantity: number; lineTotal: Prisma.Decimal }[];
   subtotal: Prisma.Decimal;
@@ -72,6 +73,7 @@ export function serializeOrderSummary(o: {
   const itemsCount = o.items.reduce((sum, i) => sum + i.quantity, 0);
   return {
     id: o.id,
+    orderNumber: o.orderNumber,
     placedAt: o.placedAt.toISOString(),
     status: toFrontendStatus(o.status),
     deliveryType: o.deliveryType,
@@ -84,6 +86,7 @@ export function serializeOrderSummary(o: {
 export function serializeOrderDetail(o: OrderWithRelations) {
   return {
     id: o.id,
+    orderNumber: o.orderNumber,
     placedAt: o.placedAt.toISOString(),
     status: toFrontendStatus(o.status),
     deliveryType: o.deliveryType,

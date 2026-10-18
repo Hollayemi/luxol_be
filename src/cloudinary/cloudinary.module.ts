@@ -1,7 +1,8 @@
 // src/cloudinary/cloudinary.module.ts
-import { Module } from '@nestjs/common';
+import { Global, Module } from '@nestjs/common';
 import { CloudinaryService } from './cloudinary.js';
 
+@Global()
 @Module({
   providers: [CloudinaryService],
   exports: [CloudinaryService],
