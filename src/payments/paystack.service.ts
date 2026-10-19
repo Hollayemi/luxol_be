@@ -195,7 +195,7 @@ export class PaystackService {
           where: { id: payment.meatBoxOrderId },
         });
 
-        if (result && result.status === "PRICE_CONFIRMED") {
+        if (result && result.status === "PENDING_PAYMENT") {
           await tx.meatBoxOrder.update({
             where: { id: result.id },
             data: {

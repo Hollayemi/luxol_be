@@ -463,6 +463,15 @@ export const NOTIFICATION_TEMPLATES = {
     params: { customerName: "string", planName: "string", amount: "number", attempt: "number", maxAttempts: "number", adminSubscriberUrl: "string" },
   },
 
+
+    ADMIN_INVITE_NEW_STAFF: {
+    channels: ["EMAIL"],
+    subject: "You've been invited to join the Luxol Market Admin Team",
+    message: "Hello {{memberName}},\n\nYou have been invited to join the Luxol Market team as a {{roleLabel}}.\n\nClick the link below to accept your invitation and set up your account. If you weren't expecting this, you can safely ignore this email.\n\nWelcome aboard,\nThe Luxol Market Team",
+    url: "{{actionUrl}}",
+    params: { memberName: "string", roleLabel: "string", actionUrl: "string" },
+  },
+
   ADMIN_INVITE_ACCEPTED: {
     channels: ["EMAIL", "IN_APP"],
     subject: "{{memberName}} accepted your invitation",

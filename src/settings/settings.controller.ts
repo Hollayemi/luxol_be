@@ -31,6 +31,7 @@ import { ListLoginActivityDto } from "./dto/list-login-activity.dto.js";
 import { UpdateNotificationSettingsDto } from "./dto/update-notification-settings.dto.js";
 import { InviteAdminUserDto } from "./dto/invite-admin.dto.js";
 import { UpdateTeamStatusDto } from "./dto/update-team-status.dto.js";
+import { AcceptInviteDto } from "./dto/accept-invite.dto.js";
 
 const STAFF: Role[] = [
   "SUPER_ADMIN",
@@ -49,7 +50,7 @@ export class AdminSettingsController {
     private security: SecurityService,
     private notifications: AdminNotificationsService,
     private team: TeamService,
-  ) {}
+  ) { }
 
   // ─── Profile ─────────────────────────────────────────────
 
@@ -200,7 +201,7 @@ export class AdminSettingsController {
 @Controller("admin/invitations")
 
 export class AdminInvitationsController {
-  constructor(private team: TeamService) {}
+  constructor(private team: TeamService) { }
   @Post()
   async invite(
     @Body() dto: InviteAdminUserDto,
@@ -215,5 +216,22 @@ export class AdminInvitationsController {
   @Post(":id/resend")
   async resend(@Param("id") id: string) {
     return { message: "Invitation resent", data: await this.team.resend(id) };
+  }
+
+
+  @Get("verify")
+  async verify(@Query("token") token: string) {
+    return {
+      message: "OK",
+      data: await this.team.verifyInvitation(token),
+    };
+  }
+
+  @Post("accept")
+  async accept(@Query("token") token: string, @Body() dto: AcceptInviteDto) {
+    return {
+      message: "Invitation accepted",
+      data: await this.team.acceptInvitation(token, dto),
+    };
   }
 }

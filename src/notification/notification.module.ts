@@ -1,4 +1,4 @@
-import { Module } from "@nestjs/common";
+import { Global, Module } from "@nestjs/common";
 import { NotificationsController } from "./notifications.controller.js";
 import { NotificationsService } from "./notifications.service.js";
 import { EmailZohoAdapter } from "./channels/email-zoho.adapter.js";
@@ -7,6 +7,7 @@ import { WebPushAdapter } from "./channels/webpush.adapter.js";
 import { DatabaseService } from "../database/database.service.js";
 import { ConfigService } from "@nestjs/config";
 
+@Global()
 @Module({
   controllers: [NotificationsController],
   providers: [

@@ -53,16 +53,6 @@ export class MeatBoxOrdersController {
     return { message: "OK", data: await this.svc.findMine(u.id, id) };
   }
 
-  @Post(":id/place")
-  async place(
-    @CurrentUser() u: { id: string },
-    @Param("id") id: string,
-  ) {
-    return {
-      message: "Payment started",
-      data: await this.svc.placeOrder(u.id, id),
-    };
-  }
 
   @Post(":id/cancel")
   async cancel(

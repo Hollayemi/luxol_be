@@ -6,15 +6,22 @@ import {
 } from "@nestjs/common";
 import { Role } from "../generated/prisma/client.js";
 import { randomBytes } from "crypto";
+import * as bcrypt from "bcrypt";
 import { InviteAdminUserDto } from "./dto/invite-admin.dto.js";
 import { UpdateTeamStatusDto } from "./dto/update-team-status.dto.js";
+import { AcceptInviteDto } from "./dto/accept-invite.dto.js";
 import { serializeTeamMember } from "./settings.serializer.js";
-import { STAFF_ROLES } from "./settings.constants.js";
+import { ROLE_LABELS, STAFF_ROLES } from "./settings.constants.js";
 import { DatabaseService } from "../database/database.service.js";
+import { NotificationsService } from "../notification/notifications.service.js";
+import { serializeUserProfile, UserRow } from "../users/users.serializer.js";
 
 @Injectable()
 export class TeamService {
-  constructor(private db: DatabaseService) {}
+  constructor(
+    private db: DatabaseService,
+    private notifications: NotificationsService
+  ) { }
 
   async list(currentUserId: string) {
     const [users, invitations] = await Promise.all([
@@ -33,23 +40,19 @@ export class TeamService {
     ]);
 
     const items = [
-      // Real users
       ...users.map((u) =>
         serializeTeamMember(
           { ...u, teamStatus: "ACTIVE" },
           { canManage: u.id !== currentUserId },
         ),
       ),
-      // Pending invitations — show them as INVITED rows
       ...invitations.map((inv) => ({
         id: `invite_${inv.id}`,
         fullName: inv.email.split("@")[0],
         avatar: null,
         email: inv.email,
         role: inv.role.toLowerCase(),
-        roleLabel: STAFF_ROLES.includes(inv.role)
-          ? inv.role.replace("_", " ").toLowerCase().replace(/\b\w/g, (c) => c.toUpperCase())
-          : "Admin",
+        roleLabel: ROLE_LABELS[inv.role] || "Admin",
         lastActiveAt: null,
         status: "invited" as const,
         canManage: true,
@@ -88,6 +91,7 @@ export class TeamService {
     const token = randomBytes(32).toString("hex");
     const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000); // 7 days
 
+    // Create the invitation
     const invitation = await this.db.adminInvitation.create({
       data: {
         email,
@@ -98,7 +102,15 @@ export class TeamService {
       },
     });
 
-    // TODO: send email with `${FRONTEND_URL}/admin/accept-invite?token=${token}`
+    // Send the email
+    await this.notifications.notifyTemplate("ADMIN_INVITE_NEW_STAFF", {
+      userId: existingUser?.id,
+      context: {
+        memberName: existingUser?.name || email.split("@")[0],
+        roleLabel: ROLE_LABELS[dto.role],
+        actionUrl: `${process.env.FRONTEND_URL}/admin/auth/invite?token=${token}`,
+      },
+    });
 
     return {
       id: `invite_${invitation.id}`,
@@ -106,7 +118,7 @@ export class TeamService {
       avatar: null,
       email,
       role: dto.role.toLowerCase(),
-      roleLabel: dto.role.replace("_", " ").toLowerCase().replace(/\b\w/g, (c) => c.toUpperCase()),
+      roleLabel: ROLE_LABELS[dto.role],
       lastActiveAt: null,
       status: "invited" as const,
       canManage: true,
@@ -114,32 +126,129 @@ export class TeamService {
   }
 
   async resend(invitationId: string) {
+    const id = invitationId.split("_")[1]
     const invite = await this.db.adminInvitation.findUnique({
-      where: { id: invitationId },
+      where: { id },
     });
-    if (!invite || invite.acceptedAt || invite?.revokedAt) {
-      throw new NotFoundException("Invitation not found");
+    if (!invite || invite.acceptedAt || invite.revokedAt) {
+      throw new NotFoundException("Invitation not found or already accepted");
     }
 
-    // Rotate the token + extend the expiry
     const token = randomBytes(32).toString("hex");
     const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
 
-    await this.db.adminInvitation.update({
-      where: { id: invitationId },
+    const user = await this.db.user.findUnique({ where: { email: invite.email } });
+
+    const invitation = await this.db.adminInvitation.update({
+      where: { id },
       data: { token, expiresAt },
     });
 
-    // TODO: send the email
+    await this.notifications.notifyTemplate("ADMIN_INVITE_NEW_STAFF", {
+      userId: user?.id,
+      email: invitation.email,
+      context: {
+        memberName: user?.name || invite.email.split("@")[0],
+        roleLabel: ROLE_LABELS[invite.role],
+        actionUrl: `${process.env.FRONTEND_URL}/admin/accept-invite?token=${token}`,
+      },
+    });
 
     return { id: `invite_${invitationId}` };
   }
 
-  async updateStatus(
-    id: string,
-    dto: UpdateTeamStatusDto,
-    currentUserId: string,
-  ) {
+  // ─── NEW: Accept Flow ────────────────────────────────────────
+
+  async verifyInvitation(token: string) {
+    const invite = await this.db.adminInvitation.findUnique({
+      where: { token },
+    });
+
+    console.log(invite)
+
+    if (!invite) throw new NotFoundException("Invalid invitation link");
+    if (invite.acceptedAt) throw new BadRequestException("Invitation already accepted");
+    if (invite.revokedAt) throw new BadRequestException("Invitation was revoked");
+    if (invite.expiresAt < new Date()) throw new BadRequestException("Invitation has expired");
+
+    const existingUser = await this.db.user.findUnique({
+      where: { email: invite.email },
+    });
+
+    console.log(existingUser)
+
+    return {
+      email: invite.email,
+      role: invite.role.toLowerCase(),
+      roleLabel: ROLE_LABELS[invite.role],
+      user: existingUser && serializeUserProfile(existingUser as UserRow) || {},
+      hasAccount: !!existingUser,
+    };
+  }
+
+  async acceptInvitation(token: string, dto: AcceptInviteDto) {
+    const invite = await this.db.adminInvitation.findUnique({
+      where: { token },
+    });
+
+    if (!invite) throw new NotFoundException("Invalid invitation link");
+    if (invite.acceptedAt) throw new BadRequestException("Invitation already accepted");
+    if (invite.revokedAt) throw new BadRequestException("Invitation was revoked");
+    if (invite.expiresAt < new Date()) throw new BadRequestException("Invitation has expired");
+
+    const passwordHash = await bcrypt.hash(dto.password, 12);
+
+    const user = await this.db.$transaction(async (tx) => {
+      // Find or create the user
+      let existingUser = await tx.user.findUnique({
+        where: { email: invite.email },
+      });
+
+      if (existingUser) {
+        // Upgrade existing customer to staff
+        existingUser = await tx.user.update({
+          where: { id: existingUser.id },
+          data: {
+            role: invite.role,
+            emailVerified: existingUser.emailVerified ?? new Date(), // auto-verify since they clicked the email
+            teamStatus: "ACTIVE",
+            isActive: true,
+          },
+        });
+      } else {
+        existingUser = await tx.user.create({
+          data: {
+            email: invite.email,
+            name: dto.name,
+            passwordHash,
+            phone: dto.phone,
+            role: invite.role,
+            teamStatus: "ACTIVE",
+            emailVerified: new Date(),
+            isActive: true,
+          },
+        });
+      }
+
+      // Mark invite accepted
+      await tx.adminInvitation.update({
+        where: { id: invite.id },
+        data: { acceptedAt: new Date() },
+      });
+
+      return existingUser;
+    });
+
+    // Return the user and a token so they can immediately login
+    return {
+      message: "Invitation accepted. You can now log in.",
+      user: { id: user.id, email: user.email, name: user.name, role: user.role },
+    };
+  }
+
+  // ─── Manage Team ─────────────────────────────────────────────
+
+  async updateStatus(id: string, dto: UpdateTeamStatusDto, currentUserId: string) {
     if (id === currentUserId) {
       throw new BadRequestException("You cannot change your own status");
     }
@@ -153,12 +262,10 @@ export class TeamService {
       where: { id },
       data: {
         teamStatus: dto.status === "active" ? "ACTIVE" : "SUSPENDED",
-        // Suspending should also lock them out immediately
         isActive: dto.status === "active",
       },
     });
 
-    // Revoke their live sessions when suspended
     if (dto.status === "suspended") {
       await this.db.adminSession.updateMany({
         where: { userId: id, revokedAt: null },
@@ -167,21 +274,25 @@ export class TeamService {
     }
 
     const refreshed = await this.db.user.findUniqueOrThrow({ where: { id } });
-
     return serializeTeamMember(refreshed, { canManage: true });
   }
 
-  async remove(id: string, currentUserId: string) {
+  async remove(invitationId: string, currentUserId: string) {
+    const id = invitationId.split("_")[1]
+    const isInvite = invitationId.split("_")[0] === "invite"
     if (id === currentUserId) {
       throw new BadRequestException("You cannot remove yourself");
     }
 
     const user = await this.db.user.findUnique({ where: { id } });
     if (!user || !STAFF_ROLES.includes(user.role)) {
-      throw new NotFoundException("Team member not found");
+      if (isInvite) {
+        await this.db.adminInvitation.deleteMany({ where: { id } });
+        return { id };
+      }
+      throw new NotFoundException("Team member not found--");
     }
 
-    // Prevent removing the last Super Admin
     if (user.role === "SUPER_ADMIN") {
       const superCount = await this.db.user.count({
         where: { role: "SUPER_ADMIN", teamStatus: "ACTIVE" },
@@ -191,7 +302,9 @@ export class TeamService {
       }
     }
 
-    await this.db.user.delete({ where: { id } });
+    await this.db.user.update({ where: { id }, data: { role: Role.CUSTOMER } });
+
+    await this.db.adminInvitation.deleteMany({ where: { email: user.email } });
     return { id };
   }
 }

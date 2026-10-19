@@ -14,7 +14,7 @@ export class CloudinaryService {
   }
 
   // Upload one file → returns the URL
-  async upload(file: Express.Multer.File, folder = 'lawticha'): Promise<string> {
+  async upload(file: Express.Multer.File, folder = 'luxol'): Promise<string> {
     return new Promise((resolve, reject) => {
       const stream = cloudinary.uploader.upload_stream(
         { folder, resource_type: 'auto' },
@@ -28,7 +28,7 @@ export class CloudinaryService {
   }
 
   // Upload many files → returns array of URLs
-  async uploadMany(files: Express.Multer.File[], folder = 'lawticha'): Promise<string[]> {
+  async uploadMany(files: Express.Multer.File[], folder = 'luxol'): Promise<string[]> {
     return Promise.all(files.map((f) => this.upload(f, folder)));
   }
 

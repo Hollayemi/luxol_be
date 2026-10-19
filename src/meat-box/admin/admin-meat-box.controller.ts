@@ -53,17 +53,6 @@ export class AdminMeatBoxController {
     return { message: "OK", data: await this.orders.findOne(id) };
   }
 
-  @Patch("orders/:id/price")
-  async updatePrice(
-    @Param("id") id: string,
-    @Body() dto: UpdateMeatBoxPriceDto,
-  ) {
-    return {
-      message: "Price confirmed",
-      data: await this.orders.updatePrice(id, dto),
-    };
-  }
-
   @Patch("orders/:id/status")
   async updateStatus(
     @Param("id") id: string,

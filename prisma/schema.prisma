@@ -191,8 +191,9 @@ enum MeatBoxUnit {
 }
 
 enum MeatBoxOrderStatus {
-  PENDING_WEIGHING
-  PRICE_CONFIRMED
+  // PENDING_WEIGHING
+  // PRICE_CONFIRMED
+  PENDING_PAYMENT
   PROCESSING
   OUT_FOR_DELIVERY
   COMPLETED
@@ -817,10 +818,12 @@ model MeatBoxCategory {
   label        String       @unique
   slug         String       @unique
   image        String?
+  pricePerKg   Decimal      @db.Decimal(12, 2) // ← Add this
   status       ActiveStatus @default(ACTIVE)
   displayOrder Int          @default(0)
-  createdAt    DateTime     @default(now())
-  updatedAt    DateTime     @updatedAt
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   options MeatBoxOption[]
 
@@ -832,33 +835,17 @@ model MeatBoxCategory {
  * A specific purchasable item: "Quarter Cow", "Goat Meat by Kg", ...
  */
 model MeatBoxOption {
-  id                String       @id @default(cuid())
-  categoryId        String
-  label             String       @unique
-  image             String?
-  unit              MeatBoxUnit
-  /**
-   * Naira per kg. Only meaningful for `unit: KG`. Null for ANIMAL.
-   */
-  pricePerKg        Decimal?     @db.Decimal(12, 2)
-  /**
-   * Estimated weight of ONE unit, e.g. quarter cow = 45–55 kg.
-   */
-  estimatedMinKg    Decimal?     @db.Decimal(10, 3)
-  estimatedMaxKg    Decimal?     @db.Decimal(10, 3)
-  /**
-   * Estimated price range shown to the customer.
-   */
-  estimatedMinPrice Decimal?     @db.Decimal(12, 2)
-  estimatedMaxPrice Decimal?     @db.Decimal(12, 2)
-  /**
-   * Hard cap on quantity per order; null = backend default (see service).
-   */
-  maxQuantity       Int?
-  status            ActiveStatus @default(ACTIVE)
-  displayOrder      Int          @default(0)
-  createdAt         DateTime     @default(now())
-  updatedAt         DateTime     @updatedAt
+  id         String  @id @default(cuid())
+  categoryId String
+  label      String  @unique
+  image      String?
+  weightKg   Decimal @db.Decimal(10, 3)
+
+  maxQuantity  Int?
+  status       ActiveStatus @default(ACTIVE)
+  displayOrder Int          @default(0)
+  createdAt    DateTime     @default(now())
+  updatedAt    DateTime     @updatedAt
 
   category   MeatBoxCategory    @relation(fields: [categoryId], references: [id])
   orderItems MeatBoxOrderItem[]
@@ -869,39 +856,32 @@ model MeatBoxOption {
 
 model MeatBoxOrder {
   id        String             @id @default(cuid())
-  code      String             @unique // "LX-10371" — no leading # in DB
+  code      String             @unique
   userId    String
   addressId String?
-  status    MeatBoxOrderStatus @default(PENDING_WEIGHING)
+  status    MeatBoxOrderStatus @default(PENDING_PAYMENT) // Starts here
 
-  // Delivery
-  deliveryFrequency  String // "ONE_TIME", "EVERY_2_WEEKS", ...
-  deliveryDay        String // "Monday"
-  deliveryWindow     String // "10:00 AM - 11:00 AM"
+  // Delivery fields stay the same...
+  deliveryFrequency  String
+  deliveryDay        String
+  deliveryWindow     String
   butcheryGuidelines String?
+  deliveryAddress    String?
+  fullName           String
+  phone              String
 
-  // Snapshot of address at order time (same pattern as Order.deliveryAddress)
-  deliveryAddress String?
-  fullName        String
-  phone           String
+  // Money fields — this replaces the estimated/confirmed split
+  subtotal    Decimal @db.Decimal(12, 2) // Sum of lineTotals
+  deliveryFee Decimal @default(0) @db.Decimal(12, 2)
+  total       Decimal @db.Decimal(12, 2) // subtotal + deliveryFee
 
-  // Estimates captured at creation
-  estimatedMinTotal Decimal? @db.Decimal(12, 2)
-  estimatedMaxTotal Decimal? @db.Decimal(12, 2)
-  estimatedMinKg    Decimal? @db.Decimal(10, 3)
-  estimatedMaxKg    Decimal? @db.Decimal(10, 3)
-
-  // Confirmed by staff after weighing
-  confirmedTotal   Decimal?  @db.Decimal(12, 2)
-  finalWeightKg    Decimal?  @db.Decimal(10, 3)
-  priceConfirmedAt DateTime?
-
-  // Payment + lifecycle
   paidAt         DateTime?
   nextDeliveryAt DateTime?
   deliveredAt    DateTime?
   cancelledAt    DateTime?
   cancelReason   String?
+
+  // DELETE estimatedMinTotal, estimatedMaxTotal, confirmedTotal, finalWeightKg, priceConfirmedAt
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -910,40 +890,24 @@ model MeatBoxOrder {
   address  Address?           @relation(fields: [addressId], references: [id], onDelete: SetNull)
   items    MeatBoxOrderItem[]
   payments Payment[]
-
-  @@index([userId])
-  @@index([status])
-  @@index([createdAt])
 }
 
 model MeatBoxOrderItem {
-  id            String      @id @default(cuid())
-  orderId       String
-  optionId      String
-  /**
-   * Snapshot of label + unit at order time.
-   */
-  label         String
-  unit          MeatBoxUnit
-  quantity      Int
-  /**
-   * Snapshot of pricePerKg (nullable for ANIMAL).
-   */
-  pricePerKg    Decimal?    @db.Decimal(12, 2)
-  /**
-   * Filled in by staff at weighing.
-   */
-  finalWeightKg Decimal?    @db.Decimal(10, 3)
-  /**
-   * Final line price after weighing.
-   */
-  lineTotal     Decimal?    @db.Decimal(12, 2)
+  id       String @id @default(cuid())
+  orderId  String
+  optionId String
+
+  // Snapshots at order time
+  label      String
+  weightKg   Decimal @db.Decimal(10, 3) // Snapshot
+  pricePerKg Decimal @db.Decimal(12, 2) // Snapshot of category price
+  quantity   Int
+  lineTotal  Decimal @db.Decimal(12, 2) // pricePerKg * weightKg * quantity
+
+  // DELETE finalWeightKg, unit
 
   order  MeatBoxOrder  @relation(fields: [orderId], references: [id], onDelete: Cascade)
   option MeatBoxOption @relation(fields: [optionId], references: [id])
-
-  @@index([orderId])
-  @@index([optionId])
 }
 
 // ─────────────────────────────────────────────────────────────

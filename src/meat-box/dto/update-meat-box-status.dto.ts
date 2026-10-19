@@ -1,9 +1,9 @@
 import { Transform } from "class-transformer";
 import { IsEnum, IsInt, IsNumber, IsOptional, IsString, Min, MinLength } from "class-validator";
-import { ActiveStatus, MeatBoxOrderStatus, MeatBoxUnit } from "../../generated/prisma/enums.js";
+import { ActiveStatus, MeatBoxOrderStatus } from "../../generated/prisma/enums.js";
 import { PartialType } from "@nestjs/mapped-types";
 
-
+// ─── Order Actions ───────────────────────────────────────────
 
 export class UpdateMeatBoxStatusDto {
   @Transform(({ value }) => (typeof value === "string" ? value.toUpperCase() : value))
@@ -14,18 +14,21 @@ export class UpdateMeatBoxStatusDto {
   note?: string;
 }
 
-
-
 export class CancelMeatBoxOrderDto {
   @IsString()
   @MinLength(3)
   reason: string;
 }
 
-
+// ─── Categories ──────────────────────────────────────────────
 
 export class CreateMeatBoxCategoryDto {
   @IsString() @MinLength(2) label: string;
+
+  // The base price for the meat in this category
+  @Transform(({ value }) => (value === "" || value === undefined ? undefined : Number(value)))
+  @IsNumber() @Min(0)
+  pricePerKg: number;
 
   @IsOptional()
   @Transform(({ value }) => (typeof value === "string" ? value.toUpperCase() : value))
@@ -38,11 +41,9 @@ export class CreateMeatBoxCategoryDto {
   displayOrder?: number;
 }
 
-
-
 export class UpdateMeatBoxCategoryDto extends PartialType(CreateMeatBoxCategoryDto) {}
 
-
+// ─── Options ─────────────────────────────────────────────────
 
 const toNumOrNull = ({ value }: { value: unknown }) => {
   if (value === undefined) return undefined;
@@ -56,34 +57,10 @@ export class CreateMeatBoxOptionDto {
 
   @IsString() @MinLength(2) label: string;
 
-  @Transform(({ value }) => (typeof value === "string" ? value.toUpperCase() : value))
-  @IsEnum(MeatBoxUnit)
-  unit: MeatBoxUnit;
-
-  @IsOptional()
-  @Transform(toNumOrNull)
-  @IsNumber()
-  pricePerKg?: number | null;
-
-  @IsOptional()
-  @Transform(toNumOrNull)
-  @IsNumber()
-  estimatedMinKg?: number | null;
-
-  @IsOptional()
-  @Transform(toNumOrNull)
-  @IsNumber()
-  estimatedMaxKg?: number | null;
-
-  @IsOptional()
-  @Transform(toNumOrNull)
-  @IsNumber()
-  estimatedMinPrice?: number | null;
-
-  @IsOptional()
-  @Transform(toNumOrNull)
-  @IsNumber()
-  estimatedMaxPrice?: number | null;
+  // The physical weight of the box. Price is computed on the backend.
+  @Transform(({ value }) => (value === "" || value === undefined ? undefined : Number(value)))
+  @IsNumber() @Min(0.1)
+  weightKg: number;
 
   @IsOptional()
   @Transform(toNumOrNull)
@@ -100,6 +77,5 @@ export class CreateMeatBoxOptionDto {
   @IsInt() @Min(0)
   displayOrder?: number;
 }
-
 
 export class UpdateMeatBoxOptionDto extends PartialType(CreateMeatBoxOptionDto) {}

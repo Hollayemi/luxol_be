@@ -20,6 +20,7 @@ import { NotifyTemplateOptions } from "./channels/template-types.js";
 export type NotifyInput = {
     /** User id (required for IN_APP; recommended for all so the row links). */
     userId?: string;
+    email?: string;
     orderId?: string;
     subscriptionId?: string;
     /** One or more channels. Duplicates are collapsed. */
@@ -85,11 +86,13 @@ export class NotificationsService {
             })
             : null;
 
+        console.log(user)
+
         const results: NotifyResult["results"] = [];
 
         for (const channel of channels) {
             // Resolve recipient for this channel
-            const to = this.resolveRecipient(channel, input, user);
+            const to = this.resolveRecipient(channel, input, user) || input.email;
             if (!to) {
                 this.logger.warn(
                     `No recipient for channel ${channel} (user ${input.userId ?? "anonymous"}) — skipping`,
@@ -202,6 +205,7 @@ export class NotificationsService {
 
         return this.notify({
             userId: opts.userId,
+            email: opts.email,
             orderId: opts.orderId,
             subscriptionId: opts.subscriptionId,
             channels: (opts.channels ?? rendered.channels) as any,
@@ -291,7 +295,7 @@ export class NotificationsService {
         const explicit = input.recipients?.[channel];
         if (explicit) return explicit;
 
-        if (channel === "EMAIL") return user?.email ?? null;
+        if (channel === "EMAIL") return user?.email ?? input.email ?? null;
         if (channel === "SMS" || channel === "WHATSAPP") return user?.phone ?? null;
         if (channel === "IN_APP") return user?.id ?? null;
 

@@ -30,6 +30,7 @@ type WithOptionals<K extends NotificationTemplateKey, Extra extends string = nev
 
 export type NotifyTemplateOptions<K extends NotificationTemplateKey> = {
   userId?: string;
+  email?:string,
   orderId?: string;
   subscriptionId?: string;
   context: TemplateContext<K>;

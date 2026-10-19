@@ -1,6 +1,5 @@
+
 import { Injectable } from "@nestjs/common";
-import { AdminOrderPeriod } from "../orders/dto/list-admin-orders.dto.js";
-import { GetTopProductsDto } from "./dto/get-top-products.dto.js";
 import {
   currentWeekRange,
   periodRange,
@@ -8,13 +7,15 @@ import {
   toDateKey,
 } from "../common/utils/period.util.js";
 import { DatabaseService } from "../database/database.service.js";
+import { AdminOrderPeriod } from "../orders/dto/list-admin-orders.dto.js";
+import { GetTopProductsDto } from "./dto/get-top-products.dto.js";
 
 /** Multiplier for "running low" band — anything below this is running low. */
 const RUNNING_LOW_MULTIPLIER = 2;
 
 @Injectable()
 export class AdminOverviewService {
-  constructor(private db: DatabaseService) {}
+  constructor(private db: DatabaseService) { }
 
   // ─── GET /admin/overview ────────────────────────────────────
 
@@ -37,6 +38,8 @@ export class AdminOverviewService {
       activeMemberships,
       membershipStats,
       inventoryStats,
+      meatBoxStats,
+      orderStats, // <- NEW
       attention,
     ] = await Promise.all([
       this.weekBarData(week.start),
@@ -73,13 +76,14 @@ export class AdminOverviewService {
           },
         },
       }),
-      // Cannot reconstruct "last month's active customers" without history.
-      // Return 0 for the comparison.
+      // Snapshot gap: cannot reconstruct last month's active customers without history
       Promise.resolve(0),
 
       this.db.subscription.count({ where: { status: "ACTIVE" } }),
       this.membershipCard(),
       this.inventoryCard(),
+      this.meatBoxCard(),
+      this.orderCard(), // <- NEW
       this.attentionList(),
     ]);
 
@@ -109,23 +113,38 @@ export class AdminOverviewService {
       },
 
       modules: {
-        meatBox: {
-          activeOrders: 0,
-          preparing: 0,
-          awaitingWeight: 0,
-          nextDeliveryWindow: null,
-        },
-        freezerPlanner: {
-          activeOrders: 0,
-          processing: 0,
-          recurring: 0,
-          nextDeliveryWindow: null,
-        },
+        meatBox: meatBoxStats,
+        // Replacing freezerPlanner with live Order stats, mapped to the same shape
+        order: orderStats,
         membership: membershipStats.card,
         inventory: inventoryStats,
       },
 
       attention,
+    };
+  }
+
+  private async orderCard() {
+    const now = new Date();
+
+    const [activeOrders, processing, completed] = await Promise.all([
+      // Active orders in the system
+      this.db.order.count({
+        where: { status: { in: ["PENDING", "PROCESSING", "OUT_FOR_DELIVERY"] } },
+      }),
+      // Currently processing
+      this.db.order.count({ where: { status: "PROCESSING" } }),
+      // No "completed" shop orders in your schema, so hardcode 0
+       this.db.order.count({
+        where: { status: { in: ["DELIVERED"] } },
+      }),
+
+    ]);
+
+    return {
+      activeOrders,
+      processing,
+      completed,
     };
   }
 
@@ -155,7 +174,6 @@ export class AdminOverviewService {
       },
     });
 
-    // groupBy on DateTime won't bucket by day — do it in JS
     const byDay = new Map<string, number>();
     for (const c of counts) {
       const key = toDateKey(c.placedAt);
@@ -195,7 +213,6 @@ export class AdminOverviewService {
         }),
       ]);
 
-    // Expected monthly recurring revenue from active memberships
     let mrr = 0;
     for (const s of activePlans) {
       const p = Number(s.plan.price);
@@ -220,6 +237,42 @@ export class AdminOverviewService {
         expectedRecurringRevenue: Math.round(mrr),
       },
       newMembers,
+    };
+  }
+
+  // ─── Meat Box Card ──────────────────────────────────────────
+
+  private async meatBoxCard() {
+    // Active = PENDING_PAYMENT + PROCESSING + OUT_FOR_DELIVERY
+    const [activeOrders, pendingPayment, processing, nextDelivery] = await Promise.all([
+      this.db.meatBoxOrder.count({
+        where: { status: { in: ["PENDING_PAYMENT", "PROCESSING", "OUT_FOR_DELIVERY"] } },
+      }),
+      this.db.meatBoxOrder.count({ where: { status: "PENDING_PAYMENT" } }),
+      this.db.meatBoxOrder.count({ where: { status: "PROCESSING" } }),
+      this.db.meatBoxOrder.findFirst({
+        where: { status: "PROCESSING", nextDeliveryAt: { gte: new Date() } },
+        orderBy: { nextDeliveryAt: "asc" },
+        select: { nextDeliveryAt: true, deliveryWindow: true },
+      }),
+    ]);
+
+    let nextDeliveryWindow: string | null = null;
+    if (nextDelivery) {
+      // Format as "Today: 10:00 AM - 2:00 PM" or "Tomorrow: ..." if preferred
+      const dateStr = nextDelivery.nextDeliveryAt!.toLocaleDateString("en-NG", {
+        weekday: "short",
+        day: "numeric",
+        month: "short",
+      });
+      nextDeliveryWindow = `${dateStr} · ${nextDelivery.deliveryWindow}`;
+    }
+
+    return {
+      activeOrders,
+      preparing: processing,
+      awaitingWeight: pendingPayment, // Repurposed to mean "awaiting payment" in the new flow
+      nextDeliveryWindow,
     };
   }
 
@@ -263,17 +316,13 @@ export class AdminOverviewService {
       _sortKey: number;
     }> = [];
 
-    // Orders: pending / processing / failed payment
+    // 1. Shop Orders (pending, processing, failed payment)
     const pendingOrders = await this.db.order.findMany({
       where: {
         OR: [
           { status: "PENDING" },
           { status: "PROCESSING" },
-          {
-            payments: {
-              some: { status: "FAILED" },
-            },
-          },
+          { payments: { some: { status: "FAILED" } } },
         ],
       },
       include: {
@@ -286,12 +335,11 @@ export class AdminOverviewService {
 
     for (const o of pendingOrders) {
       const hasFailedPayment = o.payments.some((p) => p.status === "FAILED");
-      const status =
-        hasFailedPayment
-          ? "PAYMENT_ISSUE"
-          : o.status === "PENDING"
-            ? "PENDING"
-            : "PROCESSING";
+      const status = hasFailedPayment
+        ? "PAYMENT_ISSUE"
+        : o.status === "PENDING"
+          ? "PENDING"
+          : "PROCESSING";
 
       items.push({
         id: o.id,
@@ -310,15 +358,45 @@ export class AdminOverviewService {
       });
     }
 
-    // Memberships: past-due / paused-too-long
+    // 2. Meat Box Orders (pending payment, processing)
+    const meatBoxOrders = await this.db.meatBoxOrder.findMany({
+      where: {
+        OR: [
+          { status: "PENDING_PAYMENT" },
+          { status: "PROCESSING" },
+        ],
+      },
+      include: {
+        user: { select: { id: true, name: true, image: true, email: true } },
+      },
+      orderBy: { createdAt: "desc" },
+      take: limit,
+    });
+
+    for (const o of meatBoxOrders) {
+      items.push({
+        id: o.id,
+        reference: `#${o.code}`,
+        customer: {
+          id: o.user.id,
+          fullName: o.user.name,
+          avatar: o.user.image ?? null,
+          email: o.user.email,
+        },
+        kind: "MEAT_BOX",
+        amount: Number(o.total),
+        status: o.status === "PENDING_PAYMENT" ? "PENDING" : "PROCESSING",
+        createdAt: o.createdAt.toISOString(),
+        _sortKey: o.status === "PENDING_PAYMENT" ? 1 : 2,
+      });
+    }
+
+    // 3. Memberships (past-due / paused-too-long)
     const attentionSubs = await this.db.subscription.findMany({
       where: {
         OR: [
           { status: "PAUSED" },
-          {
-            status: "ACTIVE",
-            payments: { some: { status: "FAILED" } },
-          },
+          { status: "ACTIVE", payments: { some: { status: "FAILED" } } },
         ],
       },
       include: {
@@ -330,7 +408,6 @@ export class AdminOverviewService {
     });
 
     for (const s of attentionSubs) {
-      const isFailed = false; // simplification — no per-cycle payment check yet
       items.push({
         id: s.id,
         reference: `${s.plan.name} Subscription`,
@@ -342,9 +419,9 @@ export class AdminOverviewService {
         },
         kind: "MEMBERSHIP",
         amount: Number(s.plan.price),
-        status: isFailed ? "PAYMENT_ISSUE" : "PROCESSING",
+        status: "PROCESSING",
         createdAt: s.updatedAt.toISOString(),
-        _sortKey: isFailed ? 0 : 3,
+        _sortKey: 3,
       });
     }
 
@@ -363,7 +440,6 @@ export class AdminOverviewService {
     const limit = dto.limit ?? 4;
     const range = periodRange(dto.period);
 
-    // Aggregate order items within the period
     const grouped = await this.db.orderItem.groupBy({
       by: ["productId"],
       _sum: { quantity: true },
@@ -375,7 +451,6 @@ export class AdminOverviewService {
     });
 
     if (grouped.length === 0) {
-      // Fall back to newest products so the panel isn't empty
       const fallback = await this.db.product.findMany({
         where: { status: "ACTIVE" },
         orderBy: { createdAt: "desc" },
@@ -386,7 +461,7 @@ export class AdminOverviewService {
           id: p.id,
           name: p.name,
           sku: p.sku,
-          image: p.images?.[0],
+          image: p.images?.[0] || null,
           totalOrders: 0,
           periodOrders: 0,
           price: Number(p.unitPrice),
@@ -399,13 +474,7 @@ export class AdminOverviewService {
     const [products, allTimeSums] = await Promise.all([
       this.db.product.findMany({
         where: { id: { in: productIds } },
-        select: {
-          id: true,
-          name: true,
-          sku: true,
-          images: true,
-          unitPrice: true,
-        },
+        select: { id: true, name: true, sku: true, image: true, unitPrice: true },
       }),
       this.db.orderItem.groupBy({
         by: ["productId"],
@@ -427,7 +496,7 @@ export class AdminOverviewService {
           id: p.id,
           name: p.name,
           sku: p.sku,
-          image: p.images?.[0],
+          image: p.image,
           totalOrders: allTimeById.get(p.id) ?? 0,
           periodOrders: g._sum.quantity ?? 0,
           price: Number(p.unitPrice),

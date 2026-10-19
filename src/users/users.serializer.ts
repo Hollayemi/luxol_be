@@ -1,4 +1,4 @@
-type UserRow = {
+export type UserRow = {
   id: string;
   name: string;
   email: string;
