@@ -40,11 +40,13 @@ export class OrdersService {
  async placeOrder(userId: string, dto: PlaceOrderDto) {
     if (!dto.items.length) throw new BadRequestException("Cart is empty");
 
+    console.log("Placing order for user", userId, "with items:", dto);
+
     const user = await this.db.user.findUnique({ where: { id: userId } });
     if (!user) throw new NotFoundException("User not found");
 
 
-    const isDelivery = dto.deliveryMethod === "DELIVERY";
+    const isDelivery = dto.deliveryMethod === "DELIVERY" || dto.deliveryMethod === "delivery";
     let addressRow: Awaited<ReturnType<typeof this.db.address.findFirst>> = null;
     let deliveryAddressText = "";
 
@@ -269,7 +271,11 @@ export class OrdersService {
 
     // ── 6. Delivery + totals ──
     const FLAT_DELIVERY = Number(this.config.get("DELIVERY_FEE") ?? 2500);
+    console.log("FLAT_DELIVERY", FLAT_DELIVERY)
     let deliveryFee = isDelivery ? FLAT_DELIVERY : 0;
+
+    console.log("Delivery waived?", deliveryWaived, "Delivery fee before:", deliveryFee);
+
     if (deliveryWaived) deliveryFee = 0;
 
     const total = Math.max(0, subtotal - roundedDiscount + deliveryFee);

@@ -52,8 +52,6 @@ export class ProductsService {
     if (dto.categoryId) where.categoryId = dto.categoryId;
     if (dto.category) where.category = { slug: dto.category };
 
-    if (dto.tags?.length) where.tags = { hasSome: dto.tags };
-
     if (dto.minPrice != null || dto.maxPrice != null) {
       where.unitPrice = {};
       if (dto.minPrice != null) (where.unitPrice as any).gte = dto.minPrice;
@@ -69,6 +67,75 @@ export class ProductsService {
       ];
     }
 
+    // ─── System Tags ───────────────────────────────────────────
+    if (dto.tag === "popular") {
+      // Get top 50 best-selling product IDs
+      const topSelling = await this.db.orderItem.groupBy({
+        by: ["productId"],
+        _sum: { quantity: true },
+        orderBy: { _sum: { quantity: "desc" } },
+        take: 50,
+      });
+
+      if (topSelling.length > 0) {
+        where.id = { in: topSelling.map((t) => t.productId) };
+      } else {
+        // Fallback if no sales yet: just show recent active products
+        where.status = "ACTIVE";
+        where.createdAt = { gte: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000) };
+      }
+
+    } else if (dto.tag === "deal-of-the-day") {
+
+      const now = new Date();
+      
+      // Fetch active promotions directly to get their product/category targets
+      const activePromos = await this.db.promotion.findMany({
+        where: {
+          status: "ACTIVE",
+          startAt: { lte: now },
+          OR: [{ endAt: null }, { endAt: { gte: now } }],
+        },
+        include: { productLinks: true },
+      });
+      console.log(activePromos)
+
+      const promoProductIds = new Set<string>();
+      const promoCategoryIds: string[] = [];
+
+      for (const promo of activePromos) {
+        if (promo.appliesTo === "SPECIFIC_PRODUCTS") {
+          promo.productLinks.forEach((pl) => promoProductIds.add(pl.productId));
+        } else if (promo.appliesTo === "CATEGORY" && promo.categoryId) {
+          promoCategoryIds.push(promo.categoryId);
+        }
+      }
+
+      const orClause: Prisma.ProductWhereInput[] = [];
+      if (promoProductIds.size > 0) {
+        orClause.push({ id: { in: Array.from(promoProductIds) } });
+      }
+      if (promoCategoryIds.length > 0) {
+        orClause.push({ categoryId: { in: promoCategoryIds } });
+      }
+
+      // If there are no active promos, force an empty result
+      if (orClause.length === 0) {
+        where.id = "none";
+      } else {
+        where.OR = orClause;
+      }
+
+    } else if (dto.tag === "new-arrival") {
+      const twoWeeksAgo = new Date();
+      twoWeeksAgo.setDate(twoWeeksAgo.getDate() - 14);
+
+      where.createdAt = { gte: twoWeeksAgo };
+
+    } else if (dto.tag) {
+      where.tags = { has: dto.tag };
+    }
+
     const orderBy = this.resolveSort(dto.sort);
 
     const [total, rows] = await Promise.all([
@@ -76,9 +143,10 @@ export class ProductsService {
       this.db.product.findMany({ where, include: this.include, orderBy, skip, take: perPage }),
     ]);
 
-    // ── One extra query for all applicable promotions ──
+    // Fetch promotions for the specific page of products so we can serialize prices
     const productIds = rows.map((r) => r.id);
     const categoryIds = [...new Set(rows.map((r) => r.categoryId))];
+
     const promotions =
       productIds.length > 0
         ? await this.promotionFinder.findActiveForProducts({
@@ -94,7 +162,6 @@ export class ProductsService {
       page,
     };
   }
-
 
   private resolveSort(sort?: string): Prisma.ProductOrderByWithRelationInput[] {
     switch (sort) {
@@ -157,6 +224,7 @@ export class ProductsService {
     if (slugClash) throw new ConflictException("Product slug already exists");
 
     const sku = dto.sku ?? (await nextCode(this.db, "product_sku", "SKU", 6));
+    console.log("SKU:", sku)
     const skuClash = await this.db.product.findUnique({ where: { sku } });
     if (skuClash) throw new ConflictException("SKU already exists");
 

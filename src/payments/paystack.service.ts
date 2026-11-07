@@ -240,6 +240,7 @@ export class PaystackService {
 
     });
 
+    
     this.logger.log(`Payment confirmed: ${reference} → order ${updated?.result?.id}`);
 
     const frontendUrl = this.config.get<string>("FRONTEND_URL") ?? "http://localhost:3000";
@@ -248,7 +249,7 @@ export class PaystackService {
       ? `${frontendUrl}/meat-box/manage?meatBoxOrderId=${payment.meatBoxOrderId}`
       : payment.subscriptionId
         ? `${frontendUrl}/subscription`
-        : `${frontendUrl}/orders/${payment.orderId}`;
+        : `${frontendUrl}/orders?orderId=${payment.orderId}`;
 
     return redirectUrl
   }

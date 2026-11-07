@@ -474,7 +474,7 @@ export class AdminOverviewService {
     const [products, allTimeSums] = await Promise.all([
       this.db.product.findMany({
         where: { id: { in: productIds } },
-        select: { id: true, name: true, sku: true, image: true, unitPrice: true },
+        // select: { id: true, name: true, sku: true, image: true, unitPrice: true },
       }),
       this.db.orderItem.groupBy({
         by: ["productId"],
@@ -496,7 +496,7 @@ export class AdminOverviewService {
           id: p.id,
           name: p.name,
           sku: p.sku,
-          image: p.image,
+          image: p.images?.[0],
           totalOrders: allTimeById.get(p.id) ?? 0,
           periodOrders: g._sum.quantity ?? 0,
           price: Number(p.unitPrice),

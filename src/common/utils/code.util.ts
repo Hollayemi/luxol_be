@@ -1,5 +1,5 @@
 import { DatabaseService } from "../../database/database.service.js";
-
+import { randomInt } from "crypto";
 
 export async function nextCode(
   db: DatabaseService,
@@ -7,12 +7,8 @@ export async function nextCode(
   prefix: string,
   pad = 4,
 ): Promise<string> {
-  const c = await db.counter.upsert({
-    where: { name },
-    update: { value: { increment: 1 } },
-    create: { name, value: 1 },
-  });
-  return `${prefix}-${String(c.value).padStart(pad, "0")}`;
+  const value = randomInt(0, 10 ** pad);
+  return `${prefix}-${String(value).padStart(pad, "0")}`;
 }
 
 

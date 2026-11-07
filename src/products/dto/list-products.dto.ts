@@ -1,4 +1,4 @@
-import { Type } from "class-transformer";
+import { Transform, Type } from "class-transformer";
 import {
   IsArray,
   IsBoolean,
@@ -34,34 +34,32 @@ export class ListProductsDto {
   isFeatured?: boolean;
 
   @IsOptional()
-  @IsArray()
-  @IsString({ each: true })
-  @Type(() => String)
-  tags?: string[];
-
-  @IsOptional()
-  @IsNumber()
-  @Type(() => Number)
-  minPrice?: number;
-
-  @IsOptional()
-  @IsNumber()
-  @Type(() => Number)
-  maxPrice?: number;
-
-  @IsOptional()
   @IsString()
-  sort?: string; // "newest" | "price_asc" | "price_desc" | "name_asc"
+  tag?: 'deal-of-the-day' | 'new-arrival' | 'popular';
 
-  @IsOptional()
-  @Type(() => Number)
-  @IsInt()
-  @Min(1)
-  page?: number = 1;
+@IsOptional()
+@IsNumber()
+@Type(() => Number)
+minPrice ?: number;
 
-  @IsOptional()
-  @Type(() => Number)
-  @IsInt()
-  @Min(1)
-  perPage?: number = 20;
+@IsOptional()
+@IsNumber()
+@Type(() => Number)
+maxPrice ?: number;
+
+@IsOptional()
+@IsString()
+sort ?: string; // "newest" | "price_asc" | "price_desc" | "name_asc"
+
+@IsOptional()
+@Type(() => Number)
+@IsInt()
+@Min(1)
+page ?: number = 1;
+
+@IsOptional()
+@Type(() => Number)
+@IsInt()
+@Min(1)
+perPage ?: number = 20;
 }
